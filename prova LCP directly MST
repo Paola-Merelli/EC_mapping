@@ -81,3 +81,171 @@ find_optimal_corridor_network <- function(points, resistance_layer, method = "mo
     return(mst_edges)
   }
 }
+
+
+
+# Example usage
+points <- your_points_dataframe  # Coordinates of national parks
+resistance_layer <- your_resistance_raster
+optimal_network <- find_optimal_corridor_network(points, resistance_layer, method = "modified_prim")
+
+
+
+
+
+
+
+
+
+##############################################
+
+
+library(gdistance)
+library(igraph)
+library(raster)
+library(sf)
+
+# Function to find optimal network connecting multiple points using different methods
+compare_corridor_networks <- function(points, resistance_layer) {
+  # Store results for both methods
+  results <- list()
+  
+  # Function to calculate total network cost
+  calculate_network_cost <- function(edges, points, resistance_layer) {
+    total_cost <- 0
+    for(i in 1:nrow(edges)) {
+      transition <- transition(resistance_layer, function(x) 1/mean(x), 8)
+      cost <- costDistance(transition, 
+                         points[edges[i,1],], 
+                         points[edges[i,2],])
+      total_cost <- total_cost + cost
+    }
+    return(total_cost)
+  }
+  
+  # 1. Modified Prim's Algorithm
+  start_time <- Sys.time()
+  n_points <- nrow(points)
+  mst_edges_prim <- matrix(ncol = 2, nrow = 0)
+  visited <- c(1)
+  unvisited <- 2:n_points
+  
+  while(length(unvisited) > 0) {
+    min_cost <- Inf
+    best_edge <- c(NA, NA)
+    
+    for(i in visited) {
+      for(j in unvisited) {
+        transition <- transition(resistance_layer, function(x) 1/mean(x), 8)
+        costDistance <- costDistance(transition, 
+                                  points[i,], 
+                                  points[j,])
+        
+        if(costDistance < min_cost) {
+          min_cost <- costDistance
+          best_edge <- c(i, j)
+        }
+      }
+    }
+    
+    mst_edges_prim <- rbind(mst_edges_prim, best_edge)
+    visited <- c(visited, best_edge[2])
+    unvisited <- setdiff(unvisited, best_edge[2])
+  }
+  
+  end_time <- Sys.time()
+  results$prim <- list(
+    edges = mst_edges_prim,
+    runtime = as.numeric(difftime(end_time, start_time, units = "secs")),
+    total_cost = calculate_network_cost(mst_edges_prim, points, resistance_layer)
+  )
+  
+  # 2. Concurrent Growth Method
+  start_time <- Sys.time()
+  clusters <- as.list(1:n_points)
+  mst_edges_concurrent <- matrix(ncol = 2, nrow = 0)
+  
+  while(length(clusters) > 1) {
+    min_cost <- Inf
+    best_edge <- c(NA, NA)
+    best_clusters <- c(NA, NA)
+    
+    for(i in 1:(length(clusters)-1)) {
+      for(j in (i+1):length(clusters)) {
+        for(p1 in clusters[[i]]) {
+          for(p2 in clusters[[j]]) {
+            transition <- transition(resistance_layer, function(x) 1/mean(x), 8)
+            costDistance <- costDistance(transition, 
+                                      points[p1,], 
+                                      points[p2,])
+            
+            if(costDistance < min_cost) {
+              min_cost <- costDistance
+              best_edge <- c(p1, p2)
+              best_clusters <- c(i, j)
+            }
+          }
+        }
+      }
+    }
+    
+    mst_edges_concurrent <- rbind(mst_edges_concurrent, best_edge)
+    clusters[[best_clusters[1]]] <- c(clusters[[best_clusters[1]]], 
+                                    clusters[[best_clusters[2]]])
+    clusters <- clusters[-best_clusters[2]]
+  }
+  
+  end_time <- Sys.time()
+  results$concurrent <- list(
+    edges = mst_edges_concurrent,
+    runtime = as.numeric(difftime(end_time, start_time, units = "secs")),
+    total_cost = calculate_network_cost(mst_edges_concurrent, points, resistance_layer)
+  )
+  
+  # Create visualization if points are in a proper spatial format
+  if(all(c("x", "y") %in% colnames(points)) || 
+     inherits(points, "SpatialPoints") || 
+     inherits(points, "sf")) {
+    
+    # Convert points to sf if necessary
+    if(!inherits(points, "sf")) {
+      if(inherits(points, "SpatialPoints")) {
+        points_sf <- st_as_sf(points)
+      } else {
+        points_sf <- st_as_sf(points, coords = c("x", "y"))
+      }
+    } else {
+      points_sf <- points
+    }
+    
+    # Create network visualizations
+    plot_network <- function(edges, title) {
+      plot(points_sf, main = title)
+      for(i in 1:nrow(edges)) {
+        lines(rbind(
+          st_coordinates(points_sf[edges[i,1],]),
+          st_coordinates(points_sf[edges[i,2],])
+        ))
+      }
+    }
+    
+    par(mfrow = c(1,2))
+    plot_network(results$prim$edges, "Modified Prim's Algorithm")
+    plot_network(results$concurrent$edges, "Concurrent Growth Method")
+    par(mfrow = c(1,1))
+  }
+  
+  # Print comparison summary
+  cat("\nComparison Summary:\n")
+  cat("Modified Prim's Algorithm:\n")
+  cat("- Runtime:", round(results$prim$runtime, 2), "seconds\n")
+  cat("- Total network cost:", round(results$prim$total_cost, 2), "\n")
+  cat("\nConcurrent Growth Method:\n")
+  cat("- Runtime:", round(results$concurrent$runtime, 2), "seconds\n")
+  cat("- Total network cost:", round(results$concurrent$total_cost, 2), "\n")
+  
+  return(results)
+}
+
+# Example usage:
+# results <- compare_corridor_networks(your_points, your_resistance_layer)
