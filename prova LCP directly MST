@@ -1,0 +1,83 @@
+library(gdistance)
+library(igraph)
+
+# Function to find optimal network connecting multiple points using MST and least cost paths
+find_optimal_corridor_network <- function(points, resistance_layer, method = "modified_prim") {
+  n_points <- nrow(points)
+  
+  if(method == "modified_prim") {
+    # Modified Prim's algorithm for spatial MST
+    # Initialize empty network
+    mst_edges <- matrix(ncol = 2, nrow = 0)
+    visited <- c(1)
+    unvisited <- 2:n_points
+    
+    while(length(unvisited) > 0) {
+      min_cost <- Inf
+      best_edge <- c(NA, NA)
+      
+      # For each visited point, find shortest path to unvisited points
+      for(i in visited) {
+        for(j in unvisited) {
+          # Calculate least cost path between points i and j
+          transition <- transition(resistance_layer, function(x) 1/mean(x), 8)
+          costDistance <- costDistance(transition, 
+                                    points[i,], 
+                                    points[j,])
+          
+          if(costDistance < min_cost) {
+            min_cost <- costDistance
+            best_edge <- c(i, j)
+          }
+        }
+      }
+      
+      # Add best edge to MST
+      mst_edges <- rbind(mst_edges, best_edge)
+      visited <- c(visited, best_edge[2])
+      unvisited <- setdiff(unvisited, best_edge[2])
+    }
+    
+    return(mst_edges)
+  } else if(method == "concurrent") {
+    # Concurrent growth approach
+    # Initialize clusters for each point
+    clusters <- as.list(1:n_points)
+    mst_edges <- matrix(ncol = 2, nrow = 0)
+    
+    while(length(clusters) > 1) {
+      min_cost <- Inf
+      best_edge <- c(NA, NA)
+      best_clusters <- c(NA, NA)
+      
+      # Find shortest path between any two clusters
+      for(i in 1:(length(clusters)-1)) {
+        for(j in (i+1):length(clusters)) {
+          # Calculate minimum cost between any points in clusters i and j
+          for(p1 in clusters[[i]]) {
+            for(p2 in clusters[[j]]) {
+              transition <- transition(resistance_layer, function(x) 1/mean(x), 8)
+              costDistance <- costDistance(transition, 
+                                        points[p1,], 
+                                        points[p2,])
+              
+              if(costDistance < min_cost) {
+                min_cost <- costDistance
+                best_edge <- c(p1, p2)
+                best_clusters <- c(i, j)
+              }
+            }
+          }
+        }
+      }
+      
+      # Merge clusters and add edge
+      mst_edges <- rbind(mst_edges, best_edge)
+      clusters[[best_clusters[1]]] <- c(clusters[[best_clusters[1]]], 
+                                      clusters[[best_clusters[2]]])
+      clusters <- clusters[-best_clusters[2]]
+    }
+    
+    return(mst_edges)
+  }
+}
