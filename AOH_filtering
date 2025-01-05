@@ -1,0 +1,260 @@
+# codice per filtrare i file AOH con extent europea e cropparli -> EU_final da cui partire per poi filtrare i vari paesi
+
+### su locale
+
+# from all -> intersected with ext(eu_admin_no_beyond.shp)
+library(terra)
+library(sf)
+library(dplyr)
+setwd("D:/")
+
+eu <- vect("corridors/europe_admin_wgs/eu_admin_nobeyond_wgs.shp")
+eu <- project(eu, "EPSG:4326")
+crs(eu)
+eu_extent <- ext(eu)
+
+prova_crs <- rast("corridors/AOH/Extracted/Birds_migratory_accipitriformes/Accipiter_badius_B.tif")
+crs(prova_crs)
+
+
+base_path <- "corridors/AOH/Extracted/"
+ordini <- list.dirs(base_path, recursive = FALSE)
+rasters_to_keep <- list()
+
+for (ordine in ordini) {
+  
+  raster_files <- list.files(ordine, pattern = "\\.tif$", full.names = TRUE)
+  
+  for (raster_file in raster_files) {
+    
+    r <- rast(raster_file)
+    
+    if (relate(ext(r), eu_extent, "intersects")) {
+      rasters_to_keep <- append(rasters_to_keep, raster_file)
+    }
+  }
+}
+
+print(rasters_to_keep)
+
+# cosi ne seleziona 1020.  
+
+
+
+##### croppo i file all'extent eu
+
+output_folder <- "corridors/AOH/EU_final/"
+dir.create(output_folder, recursive =T)
+
+europe_mask <- vect("corridors/europe_admin_wgs/eu_admin_nobeyond_wgs.shp")
+
+# Funzione per processare e salvare un singolo raster
+process_raster <- function(raster_path, mask, output_folder) {
+  tryCatch({
+    # Carica il raster
+    r <- rast(raster_path)
+    
+    # Croppa e maschera il raster
+    cropped_raster <- crop(r, mask, snap = "out")  # Croppa il raster
+    masked_raster <- mask(cropped_raster, mask)    # Applica la maschera
+    
+    # Definisci il percorso di salvataggio
+    output_path <- file.path(output_folder, basename(raster_path))
+    
+    # Salva il raster clippato
+    writeRaster(masked_raster, output_path, overwrite = TRUE)
+    
+    # Rimuovi il raster dall'ambiente per liberare memoria
+    rm(r, cropped_raster, masked_raster)
+    gc()  # Richiama la garbage collection per liberare memoria
+    
+    message("Processed: ", raster_path)
+  }, error = function(e) {
+    message("Error processing: ", raster_path, " - ", e)
+  })
+}
+
+# Applica la funzione a tutti i file raster
+lapply(rasters_to_keep, process_raster, mask = europe_mask, output_folder = output_folder)
+
+
+
+
+## su server
+
+
+# filtro AOH_EU == 1 per paese. ex ita
+library(terra)
+library(raster)
+
+#setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
+
+input_folder <- "EU_final/"  
+output_folder <- "IT_AOH/"
+dir.create(output_folder, recursive = F)
+
+raster_files <- list.files(input_folder, pattern = "\\.tif$", full.names = TRUE)
+length(raster_file)
+ita_mask <- vect("IT/data_input/italian_territory.shp")
+print(crs(ita_mask))
+test <- rast(raster_files[1])
+crs(ita_mask) == crs(test)
+
+# Lista dei file raster (primi 10)
+rasters_to_keep <- list()
+
+for (raster_file in raster_files) {
+  cat("Processing:", raster_file, "\n")
+  
+  r <- rast(raster_file)
+  
+  # Check CRS compatibility
+  if (!crs(ita_mask) == crs(r)) {
+    cat("Skipping raster: CRS not compatible with ita_mask\n")
+    next
+  }
+  
+  # Check if extents intersect
+  if (!relate(ext(r), ext(ita_mask), "intersects")) {
+    cat("Skipping raster: no intersection with ita_mask\n")
+    next
+  }
+  
+  # Apply the mask
+  r_masked <- mask(r, ita_mask)
+  
+  # Calculate global sum and check for valid values
+  sum_values <- unlist(global(r_masked == 1, fun = "sum", na.rm = TRUE)) # Convert list to numeric
+  
+  cat("Sum values:", sum_values, "\n")
+  
+  if (!is.na(sum_values) && sum_values > 0) {
+    rasters_to_keep <- c(rasters_to_keep, raster_file)
+  }
+  
+  gc()
+}
+
+for (raster_file in rasters_to_keep) {
+  # Definisci il percorso di destinazione per ciascun file
+  destination_file <- file.path(output_folder, basename(raster_file))
+  
+  # Copia il file
+  if (file.copy(raster_file, destination_file, overwrite = TRUE)) {
+    cat("Copied:", raster_file, "to", destination_file, "\n")
+  } else {
+    cat("Failed to copy:", raster_file, "\n")
+  }
+}
+
+
+
+
+# uniformo ext su paese. ex ita
+library(terra)
+library(raster)
+
+#setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
+
+input_folder <- "IT_AOH/"  
+#IT_AOH_file_list <- as.data.frame(filename(list.files(input_folder, pattern = "\\.tif$")))
+
+output_folder <- "IT_AOH_cropped/"
+dir.create(output_folder, recursive = F)
+
+raster_files <- list.files(input_folder, pattern = "\\.tif$", full.names = TRUE)
+
+ita_mask <- vect("IT/data_input/italian_territory.shp")
+print(crs(ita_mask))
+test <- rast(raster_files[1])
+crs(ita_mask) == crs(test)
+
+
+for (raster_file in raster_files) {
+  cat("Processing:", raster_file, "\n")
+  
+  # Carica il raster
+  r <- rast(raster_file)
+  
+  # Estendi, maschera e ritaglia in base a ita_mask
+  r_extended <- extend(r, ita_mask)
+  r_masked <- mask(r_extended, ita_mask)
+  r_cropped <- crop(r_masked, ita_mask)
+  
+  # Trasforma tutti i valori diversi da 1 in NA
+  r_cropped <- classify(r_cropped, rbind(c(-Inf, 0, NA), c(1, 1, 1), c(1.0001, Inf, NA)))
+  
+  # Rimuovi la color table
+  coltab(r_cropped) <- NULL
+  
+  # Salva il raster con solo pixel habitat (1) e NA per il resto
+  output_file <- file.path(output_folder, basename(raster_file))
+  writeRaster(r_cropped, output_file, overwrite = TRUE, datatype = "INT1U") # Salva come intero a 8 bit
+  
+  gc()
+}
+
+
+
+
+
+# uniformo BNR e calcolo % copertura per specie. ex ita
+library(terra)
+library(raster)
+
+#setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
+
+raster_files <- list.files("IT_AOH_cropped/", pattern = "\\.tif$", full.names = TRUE)
+
+# Estrai i nomi delle specie rimuovendo i suffissi (_N, _R, _B) e l'estensione .tif
+species_names <- unique(gsub("_[NRB]\\.tif$|\\.tif$", "", basename(raster_files)))
+species_names
+
+# Crea una cartella per i raster uniti
+output_folder <- "IT_AOH_final/"
+#dir.create(output_folder, showWarnings = FALSE)
+
+
+
+
+for (species in species_names) {
+  cat("Processing species:", species, "\n")
+  
+  # Filtra i raster della specie corrente (con o senza suffissi)
+  species_rasters <- raster_files[grepl(paste0("^", species, "(_[NRB])?\\.tif$"), basename(raster_files))]
+  cat("Found rasters for species:", species_rasters, "\n")
+  
+  if (length(species_rasters) > 1) {
+    # Caso migratorio con più raster (_B, _N, _R)
+    cat("Merging raster for species:", species, "\n")
+    
+    # Leggi i raster
+    rasters <- lapply(species_rasters, rast)
+    cat("Number of rasters loaded:", length(rasters), "\n")
+    
+    # Somma i raster pixel per pixel
+    merged_raster <- Reduce(function(x, y) sum(x, y, na.rm = TRUE), rasters)
+    
+    # Imposta i valori maggiori di 1 a 1
+    merged_raster[merged_raster > 1] <- 1
+    
+  } else if (length(species_rasters) == 1) {
+    # Caso non migratorio o migratorio con un solo raster (_B, _N, _R)
+    cat("No merging needed for species:", species, "\n")
+    merged_raster <- rast(species_rasters)
+  } else {
+    # Nessun raster trovato per la specie (caso improbabile con dati corretti)
+    cat("No rasters found for species:", species, "\n")
+    next
+  }
+  
+  # Salva il raster unito o copiato
+  output_file <- file.path(output_folder, paste0(species, ".tif"))
+  tryCatch(
+    writeRaster(merged_raster, output_file, overwrite = TRUE),
+    error = function(e) cat("Error writing raster for species:", species, "-", e$message, "\n")
+  )
+  
+  gc()
+  
+}
