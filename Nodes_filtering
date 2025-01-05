@@ -1,0 +1,346 @@
+# Lista dei raster croppati
+raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)
+ita_mask <- vect("IT/data_input/italian_territory.shp")
+
+# Prendi la risoluzione del primo raster
+reference_raster <- rast(raster_files[1])
+
+# Rasterizza lo shapefile ita_mask con la stessa risoluzione del reference_raster
+ita_raster <- rasterize(ita_mask, reference_raster, field = 1)
+
+tot_ita <- sum(!is.na(as.vector(ita_raster)))
+tot_ita
+
+# Calcolo percentuale di copertura per ogni raster
+percent_coverages <- list()
+
+for (raster_file in raster_files) {
+  r <- rast(raster_file)
+  
+  # Conta i pixel con valore 1 (habitat)
+  habitat_pixels <- global(r == 1, "sum", na.rm = TRUE)[1]
+  
+  # Calcola la percentuale rispetto ai pixel effettivi in Italia
+  percent_coverage <- (habitat_pixels / tot_ita) * 100
+  
+  percent_coverages[[basename(raster_file)]] <- percent_coverage
+
+  gc()
+  
+}
+
+# Mostra i risultati
+print(percent_coverages)
+
+percent_coverage_df <- data.frame(
+  species = names(percent_coverages), # Nomi dei file raster (le specie)
+  percent_coverage = unlist(percent_coverages) # Valori delle percentuali
+)
+
+percent_coverage_df$percent_coverage <- round(percent_coverage_df$percent_coverage, digits = 2)
+summary(percent_coverage_df$percent_coverage)
+
+nodes_df <- percent_coverage_df
+write.csv(nodes_df, "nodes_df.csv")
+
+
+
+##### calcolo n aree protette da wdpa per specie
+
+raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)
+protected_areas <- vect("IT/data_input/wdpa_ita.shp")
+test <- rast(raster_files[1])
+
+protected_areas <- project(protected_areas, crs(test))
+crs(protected_areas) == crs(test)
+plot(protected_areas)
+plot(test, add = T)
+
+
+# Inizializza il dataframe
+percent_coverage_df <- data.frame(
+  species = basename(raster_files),  
+  percent_coverage = NA,
+  total_protected_areas = NA)
+
+# Itera su ogni raster
+for (i in seq_along(raster_files)) {
+  cat("Processing:", raster_files[i], "\n")
+  
+  # Carica il raster
+  r <- rast(raster_files[i])
+  
+  # Estrai i valori dalle aree protette
+  extracted <- extract(r, protected_areas, touches = TRUE)
+  
+  # Conta il numero totale di aree protette con habitat
+  total_pa_with_habitat <- sum(
+    tapply(extracted[, 2], extracted[, 1], function(values) any(values == 1, na.rm = TRUE))
+  )
+  
+  percent_coverage_df$total_protected_areas[i] <- total_pa_with_habitat
+  
+  gc()
+  
+}
+
+nodes_df$total_PAs <- percent_coverage_df$total_protected_areas
+write.csv(nodes_df, "nodes_df.csv")
+
+
+
+########### n PAs con almeno 30% habitat
+library(terra)
+
+raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)[101:310]
+test <- rast(raster_files[1])
+
+# Carica il layer delle aree protette (WDPA shapefile)
+wdpa <- vect("IT/data_input/wdpa_ita.shp")
+wdpa <- project(wdpa, crs(test))
+crs(wdpa) == crs(test)
+
+output <- "IT_AOH_0/"
+dir.create(output)
+
+for (j in seq_along(raster_files)) {
+  raster_file <- raster_files[j]
+  cat("Processing:", raster_file, "\n")
+  
+  # Carica il raster
+  r <- rast(raster_file)
+  
+  # Sostituisci NA con 0
+  r[is.na(r)] <- 0
+  
+  # Salva il raster modificato in un nuovo file
+  writeRaster(r, filename = file.path(output, basename(raster_file)), overwrite = TRUE)
+  
+  gc()
+  
+}
+
+
+
+raster_folder <- "IT_AOH_0"
+wdpa_file <- "IT/data_input/wdpa_ita.shp"
+
+# Caricare i dati
+wdpa <- vect(wdpa_file)
+
+# Caricare i raster di specie
+raster_files <- list.files(raster_folder, pattern = "\\.tif$", full.names = TRUE)
+
+# Proiettare wdpa al CRS del primo raster di specie
+ref_raster <- rast(raster_files[1])
+wdpa <- project(wdpa, crs(ref_raster))
+
+# Creare un vettore per salvare i risultati
+result <- numeric(length(raster_files))
+names(result) <- basename(raster_files)
+
+# Funzione per calcolare il numero di aree protette con >=30% habitat
+calculate_habitat_coverage <- function(species_raster, wdpa) {
+  # Contatore delle aree protette che soddisfano il criterio
+  count <- 0
+  
+  # Loop attraverso ciascuna area protetta
+  for (i in seq_len(nrow(wdpa))) {
+    # Selezionare una singola area protetta
+    pa <- wdpa[i, ]
+    
+    # Intersecare il raster con l'area protetta
+    pa_raster <- crop(species_raster, pa)
+    pa_raster <- mask(pa_raster, pa)
+    
+    # Contare i pixel di habitat (valore = 1) e il totale
+    habitat_pixels <- sum(values(pa_raster) == 1, na.rm = TRUE)
+    total_pixels <- sum(!is.na(values(pa_raster)))
+    
+    # Calcolare la percentuale e verificare il criterio
+    if (total_pixels > 0 && (habitat_pixels / total_pixels) >= 0.3) {
+      count <- count + 1
+    }
+  }
+  
+  return(count)
+}
+
+# Loop per processare un raster alla volta
+for (i in seq_along(raster_files)) {
+  cat("Processing", raster_files[i], "...\n")
+  
+  # Caricare il raster della specie
+  species_raster <- rast(raster_files[i])
+  
+  # Calcolare il numero di aree protette con >=30% habitat
+  result[i] <- calculate_habitat_coverage(species_raster, wdpa)
+  
+  # Pulire la memoria
+  rm(species_raster)
+  gc()
+}
+
+# Output del risultato
+print(result)
+
+prova <- as.data.frame(result)
+nodes_df <- read.csv("nodes_df.csv")
+nodes_df$habitat30 <- prova$result
+write.csv(nodes_df, "nodes_df.csv")
+
+
+
+
+
+
+#####################################################
+################# prova clusters ####################
+library(dbscan)
+library(ggplot2)
+library(sf)
+
+wdpa_ita <- st_read("IT/data_input/wdpa_ita.shp")
+# Function to prepare data for weighted DBSCAN
+
+
+prepare_weighted_dbscan <- function(shp_data, weight_column = "AREA_KM") {
+  # Check if weight column exists
+  if (!weight_column %in% names(shp_data)) {
+    stop(paste("Weight column", weight_column, "not found in the data"))
+  }
+  
+  # Calculate representative points instead of centroids to handle complex geometries
+  # This is more accurate than simple centroids for irregular shapes
+  repr_points <- st_point_on_surface(shp_data)
+  
+  # Convert to coordinates matrix
+  coords <- st_coordinates(repr_points)
+  
+  # Normalize area weights to prevent extreme values
+  weights <- shp_data[[weight_column]]
+  weights_normalized <- weights / max(weights)
+  
+  # Return prepared data
+  return(list(
+    coords = coords,
+    weights = weights_normalized
+  ))
+}
+
+# Function to perform weighted DBSCAN
+perform_weighted_dbscan <- function(coords, weights, eps, minPts) {
+  # Perform weighted DBSCAN
+  dbscan_result <- dbscan(
+    x = coords,
+    eps = eps,
+    minPts = minPts,
+    weights = weights
+  )
+  
+  return(dbscan_result)
+}
+
+# Main analysis workflow
+analyze_protected_areas <- function(wdpa_ita, eps = 10000, minPts = 3) {
+  # Check if input is an sf object
+  if (!inherits(wdpa_ita, "sf")) {
+    stop("Input must be an sf object")
+  }
+  
+  # Ensure the data is in a projected CRS (using UTM zone 32N for Italy)
+  wdpa_ita_projected <- st_transform(wdpa_ita, 32632)
+  
+  # Prepare data for DBSCAN
+  prepared_data <- prepare_weighted_dbscan(wdpa_ita_projected)
+  
+  # Perform clustering
+  clusters <- perform_weighted_dbscan(
+    coords = prepared_data$coords,
+    weights = prepared_data$weights,
+    eps = eps,
+    minPts = minPts
+  )
+  
+  # Add cluster assignments back to original data
+  wdpa_ita_projected$cluster <- clusters$cluster
+  
+  # Calculate cluster statistics using explicit namespace
+  cluster_stats <- wdpa_ita_projected %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::summarise(
+      n_areas = dplyr::n(),
+      total_area_km2 = sum(AREA_KM),
+      mean_area_km2 = mean(AREA_KM),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(cluster)
+  
+  return(list(
+    clustered_data = wdpa_ita_projected,
+    cluster_stats = cluster_stats,
+    params = list(eps = eps, minPts = minPts)
+  ))
+}
+
+# Function to visualize results
+plot_clusters <- function(results) {
+  # Basic plot
+  plot(results$clustered_data["cluster"], 
+       main = paste("Protected Areas Clusters\n",
+                    "eps =", results$params$eps, "m, ",
+                    "minPts =", results$params$minPts),
+       key.pos = 4,
+       pal = colorRampPalette(c("gray", "red", "blue", "green", "purple", "orange"))(
+         length(unique(results$clustered_data$cluster))
+       ))
+}
+
+# Example usage:
+# 
+results <- analyze_protected_areas(wdpa_ita, eps = 10000, minPts = 3)
+# 
+# # Plot results
+# 
+plot_clusters(results)
+#
+# # View cluster statistics
+# 
+print(results$cluster_stats)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+sp_list_birdlife <- read.csv("corridors/AOH/Birds_list_AOH_EU.csv")
+sp_list_birdlife <- gsub(" ", "_", sp_list_birdlife$bird_list_eu)
+sp_list_birdlife <- as.data.frame(sp_list_birdlife)
+sp_list_intersection <- gsub(" ", "_", species_list$final_sp_list )
+
+species_difference <- setdiff(sp_list_intersection, sp_list_birdlife$sp_list_birdlife)
+species_difference <- as.data.frame(species_difference)
