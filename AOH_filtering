@@ -258,3 +258,212 @@ for (species in species_names) {
   gc()
   
 }
+
+
+## calcolo % di copertura, n aree protette intersecate x specie, n 
+
+raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)
+ita_mask <- vect("IT/data_input/italian_territory.shp")
+
+# Prendi la risoluzione del primo raster
+reference_raster <- rast(raster_files[1])
+
+# Rasterizza lo shapefile ita_mask con la stessa risoluzione del reference_raster
+ita_raster <- rasterize(ita_mask, reference_raster, field = 1)
+
+tot_ita <- sum(!is.na(as.vector(ita_raster)))
+tot_ita
+
+# Calcolo percentuale di copertura per ogni raster
+percent_coverages <- list()
+
+for (raster_file in raster_files) {
+  r <- rast(raster_file)
+  
+  # Conta i pixel con valore 1 (habitat)
+  habitat_pixels <- global(r == 1, "sum", na.rm = TRUE)[1]
+  
+  # Calcola la percentuale rispetto ai pixel effettivi in Italia
+  percent_coverage <- (habitat_pixels / tot_ita) * 100
+  
+  percent_coverages[[basename(raster_file)]] <- percent_coverage
+
+  gc()
+  
+}
+
+# Mostra i risultati
+print(percent_coverages)
+percent_coverage_df <- data.frame(
+  species = names(percent_coverages), # Nomi dei file raster (le specie)
+  percent_coverage = unlist(percent_coverages) # Valori delle percentuali
+)
+percent_coverage_df$percent_coverage <- round(percent_coverage_df$percent_coverage, digits = 2)
+
+summary(percent_coverage_df$percent_coverage)
+
+
+nodes_df <- percent_coverage_df
+write.csv(nodes_df, "nodes_df.csv")
+
+
+
+
+
+
+##### calcolo n aree protette da wdpa per specie
+
+raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)
+protected_areas <- vect("IT/data_input/wdpa_ita.shp")
+
+test <- rast(raster_files[1])
+
+protected_areas <- project(protected_areas, crs(test))
+crs(protected_areas) == crs(test)
+plot(protected_areas)
+plot(test, add = T)
+
+
+# Inizializza il dataframe
+percent_coverage_df <- data.frame(
+  species = basename(raster_files),  
+  percent_coverage = NA,
+  total_protected_areas = NA)
+
+# Itera su ogni raster
+for (i in seq_along(raster_files)) {
+  cat("Processing:", raster_files[i], "\n")
+  
+  # Carica il raster
+  r <- rast(raster_files[i])
+  
+  # Estrai i valori dalle aree protette
+  extracted <- extract(r, protected_areas, touches = TRUE)
+  
+  # Conta il numero totale di aree protette con habitat
+  total_pa_with_habitat <- sum(
+    tapply(extracted[, 2], extracted[, 1], function(values) any(values == 1, na.rm = TRUE))
+  )
+  
+  percent_coverage_df$total_protected_areas[i] <- total_pa_with_habitat
+  
+  gc()
+  
+}
+
+nodes_df$total_PAs <- percent_coverage_df$total_protected_areas
+write.csv(nodes_df, "nodes_df.csv")
+
+
+
+
+
+
+########### n PAs con almeno 30% habitat
+library(terra)
+
+raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)[101:310]
+test <- rast(raster_files[1])
+
+# Carica il layer delle aree protette (WDPA shapefile)
+wdpa <- vect("IT/data_input/wdpa_ita.shp")
+wdpa <- project(wdpa, crs(test))
+crs(wdpa) == crs(test)
+
+output <- "IT_AOH_0/"
+dir.create(output)
+
+for (j in seq_along(raster_files)) {
+  raster_file <- raster_files[j]
+  cat("Processing:", raster_file, "\n")
+  
+  # Carica il raster
+  r <- rast(raster_file)
+  
+  # Sostituisci NA con 0
+  r[is.na(r)] <- 0
+  
+  # Salva il raster modificato in un nuovo file
+  writeRaster(r, filename = file.path(output, basename(raster_file)), overwrite = TRUE)
+  
+  gc()
+  
+}
+
+
+
+raster_folder <- "IT_AOH_0"
+wdpa_file <- "IT/data_input/wdpa_ita.shp"
+
+# Caricare i dati
+wdpa <- vect(wdpa_file)
+
+# Caricare i raster di specie
+raster_files <- list.files(raster_folder, pattern = "\\.tif$", full.names = TRUE)
+
+# Proiettare wdpa al CRS del primo raster di specie
+ref_raster <- rast(raster_files[1])
+wdpa <- project(wdpa, crs(ref_raster))
+
+# Creare un vettore per salvare i risultati
+result <- numeric(length(raster_files))
+names(result) <- basename(raster_files)
+
+# Funzione per calcolare il numero di aree protette con >=30% habitat
+calculate_habitat_coverage <- function(species_raster, wdpa) {
+  # Contatore delle aree protette che soddisfano il criterio
+  count <- 0
+  
+  # Loop attraverso ciascuna area protetta
+  for (i in seq_len(nrow(wdpa))) {
+    # Selezionare una singola area protetta
+    pa <- wdpa[i, ]
+    
+    # Intersecare il raster con l'area protetta
+    pa_raster <- crop(species_raster, pa)
+    pa_raster <- mask(pa_raster, pa)
+    
+    # Contare i pixel di habitat (valore = 1) e il totale
+    habitat_pixels <- sum(values(pa_raster) == 1, na.rm = TRUE)
+    total_pixels <- sum(!is.na(values(pa_raster)))
+    
+    # Calcolare la percentuale e verificare il criterio
+    if (total_pixels > 0 && (habitat_pixels / total_pixels) >= 0.3) {
+      count <- count + 1
+    }
+  }
+  
+  return(count)
+}
+
+# Loop per processare un raster alla volta
+for (i in seq_along(raster_files)) {
+  cat("Processing", raster_files[i], "...\n")
+  
+  # Caricare il raster della specie
+  species_raster <- rast(raster_files[i])
+  
+  # Calcolare il numero di aree protette con >=30% habitat
+  result[i] <- calculate_habitat_coverage(species_raster, wdpa)
+  
+  # Pulire la memoria
+  rm(species_raster)
+  gc()
+}
+
+# Output del risultato
+print(result)
+
+prova <- as.data.frame(result)
+
+nodes_df <- read.csv("nodes_df.csv")
+
+nodes_df$habitat30 <- prova$result
+
+write.csv(nodes_df, "nodes_df.csv")
+
+
+
+
+
+
