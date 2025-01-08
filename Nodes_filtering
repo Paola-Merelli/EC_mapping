@@ -314,7 +314,26 @@ print(results$cluster_stats)
 
 
 
+########## prova tlocoh
+library(sf)
+library(tlocoh)
 
+# Supponendo che i centroidi delle aree protette siano in formato sf
+# Centroidi delle aree protette selezionate (esempio)
+centroids_sf <- st_as_sf(centroids)  # Sostituisci con il tuo oggetto centroidi
+
+# Converti i centroidi in formato tlocoh
+coords <- st_coordinates(centroids_sf)
+locoh_points <- xyt.lxy(x = coords[, 1], y = coords[, 2], id = rep(1, nrow(coords)))
+
+# Aggiungi i vicini per creare Local Convex Hull (scegli k in base ai tuoi dati)
+locoh_clusters <- lxy.nn.add(locoh_points, k = 3)  # Modifica k se necessario
+
+# Calcola i Local Convex Hulls
+hulls <- lxy.lhs(locoh_clusters)
+
+# Visualizza i cluster
+plot(hulls, border = "blue", main = "LoCoH Clusters")
 
 
 
