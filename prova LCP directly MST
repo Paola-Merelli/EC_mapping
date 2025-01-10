@@ -1,3 +1,172 @@
+# codice elisa + limite dist_max
+
+library(terra)
+library(gdistance)
+library(igraph)
+library(FNN)
+library(sf)
+library(TSP)
+
+#setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
+
+### ispeziono distanze tra le aree protette
+
+protected_areas <- vect("IT/data_input/wdpa_ita.shp")
+crs(protected_areas)
+protected_areas <- project(protected_areas, "EPSG:3035")
+
+
+raster_files <- list.files("prova_15th_Jan/IT_habitat/", pattern = "\\.tif$", full.names = TRUE)
+
+centroidi_list <- list()
+target_crs <- crs(protected_areas)
+
+for (i in seq_along(raster_files)) {
+  cat("Processing:", raster_files[i], "\n")
+  
+  r <- rast(raster_files[i])
+  
+  if (crs(r) != target_crs) {
+    r <- project(r, target_crs)
+  }
+  
+  
+  extracted <- extract(r, protected_areas, touches = TRUE)
+  
+  protected_ids <- unique(extracted[extracted[, 2] == 1, 1])
+  
+  overlapping_areas <- protected_areas[protected_ids, ]
+  
+  centroidi <- centroids(overlapping_areas)
+  
+  centroidi_list[[i]] <- data.frame(
+    species = basename(raster_files[i]),
+    x = crds(centroidi)[, 1],
+    y = crds(centroidi)[, 2]
+  )
+  
+  gc()
+}
+
+
+centroidi_df <- do.call(rbind, centroidi_list)
+#write.csv(centroidi_df, "prova_15th_Jan/centroidi_df.csv")
+centroidi_df <- read.csv("prova_15th_Jan/centroidi_df.csv")
+centroidi_2 <- centroidi_df[centroidi_df$species == "Tadorna_tadorna.tif", ]
+
+#Resistenze
+resistance <- rast("prova_ita_iba/produced_layers/final_resistance_ita.tiff")
+crs(resistance)
+resistance <- as(resistance, "Raster")
+
+#Coordinate
+p <- centroidi_2[,-1]
+p$x <- as.numeric(p$x)
+p$y <- as.numeric(p$y)
+p <- p[, -1]
+
+#Modello di movimento
+tr <- transition(resistance, transitionFunction = mean, directions = 8)
+tr <- geoCorrection(tr)
+gc()
+load("prova_ita_iba/prova_corridoi_iba/paths_final/trans_corr.RData")
+tr <- trans_corr
+
+dist_matrix <- as.matrix(dist(p[, c("x", "y")]))
+
+max_dist <- 60000
+
+cost_matrix <- matrix(Inf, nrow = nrow(p), ncol = nrow(p))  
+
+for (i in 1:nrow(cost_matrix)) {
+  print(i)
+  for (j in 1:ncol(cost_matrix)) {
+    if (i != j) {
+     
+      euclidean_dist <- dist_matrix[i, j]
+      
+      # Calcola costDistance solo se i punti sono abbastanza vicini
+      if (euclidean_dist <= max_dist) {
+        cost_matrix[i, j] <- costDistance(
+          tr,
+          as.numeric(p[i, ]),
+          as.numeric(p[j, ])
+        )
+      }
+      gc()
+    }
+  }
+}
+
+tsp <- TSP(cost_matrix)
+tour <- solve_TSP(tsp)
+
+opt_order <- as.integer(tour)
+
+all_paths <- list()
+
+for (i in 1:(nrow(p) - 1)) {
+  if (dist_matrix[opt_order[i], opt_order[i + 1]] <= max_dist) {
+    path <- shortestPath(
+      tr,
+      as.numeric(p[opt_order[i], ]),
+      as.numeric(p[opt_order[i + 1], ]),
+      output = "SpatialLines"
+    )
+    all_paths[[i]] <- path
+  }
+  gc()
+}
+
+plot(rast(resistance))
+for (path in all_paths) {
+  plot(path, col = "red", lwd = 2, add = TRUE)
+}
+points(p, col = "blue", pch = 16, cex = 0.2)
+
+
+all_paths <- all_paths[!sapply(all_paths, is.null)]
+
+# Assegna il CRS corretto ai percorsi
+for(i in seq_along(all_paths)) {
+  if(!is.null(all_paths[[i]])) {
+    proj4string(all_paths[[i]]) <- crs("EPSG:3035")
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ############### prova direct LCP-MST su Chlidonia leucopterus
 library(terra)
 library(gdistance)
