@@ -1,0 +1,78 @@
+## AOH + dPAs + durban
+raster_files z- list.files("prova_15th_Jan/IT_habitat/", pattern = "\\.tif$", full.names = TRUE)
+test <- rast(raster_files[1])
+test <- project(test, "EPSG:3035")
+
+ita <- vect("IT/data_input/italian_territory.shp")
+crs(ita)
+wdpa <- vect("IT/data_input/wdpa_ita.shp")
+wdpa <- project(wdpa, "EPSG:3035")
+iba_ita <- vect("IT/data_input/IBA_original.shp")
+crs(iba_ita)
+
+#merging
+ita_pa <- rbind(wdpa, iba_ita)
+crs(ita_pa) 
+
+ita_raster <- rasterize(ita, test, field = 1)
+crs(ita_raster)
+
+ita_pa_raster <- rasterize(ita_pa, test, field = 1)
+crs(ita_pa_raster)
+
+resistance_d_pa_ita <- distance(ita_pa_raster, unit = "km")
+resistance_d_pa_ita <- mask(resistance_d_pa_ita, ita_raster)
+crs(resistance_dpa_ita) <- "EPSG:3035"
+print(resistance_d_pa_ita)
+
+
+# Define the min and max values for the distance and resistance scales
+min_d <- min(values(resistance_d_pa_ita), na.rm = TRUE)  # Assuming min distance is 0
+max_d <- max(values(resistance_d_pa_ita), na.rm = TRUE)  # Max distance from your data
+min_scale2 <- 0
+max_scale2 <- 100
+
+# Function to transform distance to resistance
+transform_distance <- function(distance, min_dist, max_dist, min_resist, max_resist) {
+  return(((distance - min_dist) / (max_dist - min_dist)) * (max_resist - min_resist) + min_resist)
+}
+
+# Apply the transformation to create the resistance layer
+resistance_d_pa_ita$resistance <- transform_distance(values(resistance_d_pa_ita), 
+                                                      min_d, max_d, 
+                                                      min_scale2, max_scale2)
+
+print(resistance_d_pa_ita)
+resistance_d_pa_ita <- resistance_d_pa_ita[["resistance"]]
+
+# Visualizzazione con ggplot2
+resistance_d_pa_df_ita <- as.data.frame(resistance_d_pa_ita, xy = TRUE)
+
+res_d_pa <- ggplot() +
+  geom_tile(data = resistance_d_pa_df_ita, aes(x = x, y = y, fill = resistance)) +
+  scale_fill_viridis_c(alpha = 1, begin = 0, end = 1, direction = -1, limits = c(0, 200)) +  
+  geom_sf(data = st_as_sf(ita_pa), color = "black", fill = "white", size = 0.5) +  # Linee delle aree protette
+  theme_minimal() +
+  labs(title = "PAs-Distance Layer", fill = "Resistance") +
+  coord_sf(crs = st_crs(3035), expand = FALSE) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+
+#ggsave("prova_ita_iba/produced_layers/res_d_pa.png", plot = res_d_pa)
+#writeRaster(resistance_d_pa_ita, "prova_ita_iba/produced_layers/resistance_d_pa_ita.tiff", overwrite = T)
+#writeRaster(ita_raster, "prova_ita_iba/produced_layers/ita_rast.tiff", overwrite = T)
+
+
+###################################################### durb ###############################################
+
+
+
+
+
+
+
+
+
+
+
+
+
