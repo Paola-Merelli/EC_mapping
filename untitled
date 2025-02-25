@@ -1,0 +1,159 @@
+centro_ita <- vect("prova_15th_Jan/final/centro_ita.shp")
+print(crs(centro_ita))
+
+raster_files <- list.files("prova_15th_Jan/final/AOH_centro/", pattern = "\\.tif$", full.names = TRUE)
+
+pa <- vect("prova_15th_Jan/final/iba_centro.shp")
+pa <- makeValid(pa)
+pa <- terra::project(pa, crs(centro_ita))
+target_crs <- crs(pa)
+
+c_iba_list <- list()
+areas_iba_list <- list()
+
+for (i in seq_along(raster_files)) {
+  cat("Processing:", raster_files[i], "\n")
+  
+  # Carica il raster
+  r <- rast(raster_files[i])
+  
+  # Proietta il raster, se necessario
+  r <- terra::project(r, target_crs)
+  
+  # Estrai i valori del raster per le aree protette
+  extracted <- terra::extract(r, pa, touches = TRUE)
+  
+  # Filtra le aree protette con almeno un valore 1
+  protected_ids <- unique(extracted[extracted[, 2] == 1, 1])
+  overlapping_areas <- pa[protected_ids, ]
+  
+  # Aggiungi il nome della specie agli overlapping areas
+  overlapping_areas$species <- basename(raster_files[i])
+  
+  # Calcola i centroidi
+  centroidi <- centroids(overlapping_areas)
+  
+  # Salva i centroidi
+  c_iba_list[[i]] <- data.frame(
+    species = basename(raster_files[i]),
+    x = crds(centroidi)[, 1],
+    y = crds(centroidi)[, 2]
+  )
+  
+  # Salva le overlapping areas
+  areas_iba_list[[i]] <- overlapping_areas
+  
+  gc()
+}
+c_iba_df <- do.call(rbind, c_iba_list)
+areas_iba_combined <- do.call(rbind, areas_iba_list)
+
+nodi_Embe <- areas_iba_combined[areas_iba_combined$species == "Emberiza_schoeniclus.tif", ]
+c_Embe <- c_iba_df[c_iba_df$species =="Emberiza_schoeniclus.tif", ]
+#write.csv(c_iba_df, "prova_15th_Jan/final/centroidi_iba_df.csv")
+#writeVector(areas_iba_combined, "prova_15th_Jan/final/nodes_iba_areas.shp")
+
+#################### resistance dpa
+
+r <- rast("prova_15th_Jan/final/AOH_centro/Emberiza_schoeniclus.tif")
+
+resistance_d_pa_centro <- rast("prova_15th_Jan/final/resistance_d_pa_centro.tiff")
+
+resistance_nodes_Embe <- rasterize(nodi_Embe, r, field = 1)
+res_nodes_Embe <- app(resistance_nodes_Embe, fun = function(x) ifelse(is.na(x), 100, 0))
+
+res_AOH_Embe <- app(r, fun = function(x) ifelse(x == 0, 100, 0))
+
+res_final_Embe <- resistance_d_pa_centro + res_AOH_Embe + res_nodes_Embe
+
+plot(res_final_Embe)
+plot(nodi_Embe, add = T)
+
+
+
+resistance <- res_final_Embe
+plot(resistance)
+crs(resistance)
+resistance <- as(resistance, "Raster")
+
+
+
+#Coordinate
+p <- c_Embe[,-1]
+p$x <- as.numeric(p$x)
+p$y <- as.numeric(p$y)
+
+
+#Modello di movimento
+tr <- transition(resistance, transitionFunction = mean, directions = 8)
+tr <- geoCorrection(tr)
+gc()
+
+cost_matrix <- matrix(Inf, nrow = nrow(p), ncol = nrow(p))  
+
+for (i in 1:nrow(cost_matrix)) {
+  print(i)
+  for (j in 1:ncol(cost_matrix)) {
+    cost_matrix[i, j] <- costDistance(
+    tr,
+    as.numeric(p[i, ]),
+    as.numeric(p[j, ]))
+  }
+  
+  gc()
+}
+
+tsp <- TSP(cost_matrix)
+tour <- solve_TSP(tsp)
+
+opt_order <- as.integer(tour)
+
+all_paths <- list()
+for (i in 1:(nrow(p) - 1)) {
+  path <- try(shortestPath(
+    tr,
+    as.numeric(p[opt_order[i], ]),
+    as.numeric(p[opt_order[i + 1], ]),
+    output = "SpatialLines"
+    ), silent = T)
+  
+  if (!inherits(path, "try-error") && !is.null(path)) {
+    all_paths[[i]] <- path
+  }
+  
+  gc()
+}
+
+  
+
+
+all_paths <- all_paths[!sapply(all_paths, is.null)]
+
+# Assegna il CRS corretto ai percorsi
+for(i in seq_along(all_paths)) {
+  if(!is.null(all_paths[[i]])) {
+    proj4string(all_paths[[i]]) <- crs("EPSG:3035")
+  }
+}
+for (i in seq_along(all_paths)) {
+  all_paths[[i]] <- spChFIDs(all_paths[[i]], as.character(i))
+}
+
+combined_lines <- do.call(rbind, all_paths)
+
+df <- data.frame(ID = seq_len(length(all_paths)))
+row.names(df) <- row.names(combined_lines)
+spdf <- SpatialLinesDataFrame(combined_lines, data = df)
+
+# Salva come shapefile
+writeOGR(spdf, dsn = "all_paths_Embe_iba", layer = "Embe_iba", driver = "ESRI Shapefile")
+writeRaster(res_final_Mela, "prova_15th_Jan/final/final_res_Mela_iba.tif")
+
+plot(rast(resistance))
+for (path in all_paths) {
+  plot(path, col = "red", lwd = 2, add = TRUE)
+}
+points(nodi_Embe, col = "black", cex = 0.2)
+
+
+
