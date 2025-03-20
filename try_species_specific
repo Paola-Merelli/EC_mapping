@@ -1,0 +1,378 @@
+
+##########################################################
+# RESISTANCE LAYERS: Sr, RLI, dPAs.
+
+######
+#Sr (AOH richness)
+
+AOH_richness <- rast(raster_files[1])
+values(AOH_richness) <- 0  
+
+for (file in raster_files) {
+  cat("Elaborando:", file, "\n") 
+  
+  aoh_raster <- rast(file)
+  
+  aoh_raster <- resample(aoh_raster, AOH_richness, method = "near")
+  
+  aoh_raster[is.na(aoh_raster)] <- 0
+  
+  AOH_richness <- AOH_richness + aoh_raster
+  
+  rm(aoh_raster)
+  gc()
+}
+
+plot(AOH_richness)
+head(AOH_richness)
+
+
+min_r <- min(values(AOH_richness), na.rm = TRUE)  
+max_r <- max(values(AOH_richness), na.rm = TRUE)  
+min_scale <- 0
+max_scale <- 100
+
+res_rescaling <- function(richness, min_r, max_r, min_res, max_res) {
+  return(((richness - min_r) / (max_r - min_r)) * (max_res - min_res) + min_res)
+}
+
+AOH_richness$resistance <- res_rescaling(values(AOH_richness), 
+                                         min_r, max_r, 
+                                         min_scale, max_scale)
+
+plot(AOH_richness$resistance)
+
+AOH_richness <- AOH_richness[["resistance"]]
+
+#writeRaster(AOH_richness, "next/res_AOH_richness.tif")
+
+###### RLI
+
+template_raster <- rast(raster_files[1])
+values(template_raster) <- 0  
+plot(template_raster)
+species_data <- read.csv("next/species_iucn.CSV") 
+iucn_weights <- c("LC" = 0, "NT" = 1, "VU" = 2, "EN" = 3, "CR" = 4, "EX" = 5)
+species_data$weight <- iucn_weights[species_data$iucn]
+
+sum_weights_raster <- template_raster
+species_count_raster <- template_raster
+
+for (file in raster_files) {
+  cat("Elaborando:", file, "\n")
+  species_name <- tools::file_path_sans_ext(basename(file)) 
+  aoh_raster <- rast(file)
+  aoh_raster <- resample(aoh_raster, template_raster, method = "near")
+  aoh_raster[is.na(aoh_raster)] <- 0
+  weight <- species_data$weight[species_data$species == species_name]
+  
+  if (length(weight) == 1) {
+    sum_weights_raster <- sum_weights_raster + (aoh_raster * weight)
+    species_count_raster <- species_count_raster + aoh_raster  
+  }
+  
+  rm(aoh_raster)
+  gc()
+}
+
+
+max_weight_raster <- species_count_raster * 5  
+rli_raster <- 1 - (sum_weights_raster / max_weight_raster)
+plot(rli_raster)
+
+rli_raster[is.na(rli_raster)] <- NA
+
+min_rli <- min(values(rli_raster), na.rm = TRUE)  
+max_rli <- max(values(rli_raster), na.rm = TRUE)  
+min_scale <- 0
+max_scale <- 100
+
+res_rescaling <- function(richness, min_r, max_r, min_res, max_res) {
+  return(((richness - min_r) / (max_r - min_r)) * (max_res - min_res) + min_res)
+}
+
+rli_raster$resistance <- res_rescaling(values(rli_raster), 
+                                       min_rli, max_rli, 
+                                       min_scale, max_scale)
+
+plot(rli_raster$resistance)
+
+rli_raster <- rli_raster[["resistance"]]
+
+#writeRaster(rli_raster, "RLI_Index.tif", overwrite = TRUE)
+
+####### res_dpa
+
+centro_ita <- vect("next/centro_ita.shp")
+print(crs(centro_ita))
+
+centro_ita <- terra::project(centro_ita, crs("EPSG:4326"))
+
+centro_pa <- rbind(wdpa_res, iba)
+
+centro_raster <- rasterize(centro_ita, template_raster, field = 1)
+crs(centro_raster)
+
+centro_pa_raster <- rasterize(centro_pa, template_raster, field = 1)
+crs(centro_pa_raster)
+
+res_dpa <- terra::distance(centro_pa_raster)
+res_dpa <- mask(res_dpa, centro_raster)
+res_dpa <- res_dpa / 1000
+
+
+min_d <- min(values(res_dpa), na.rm = TRUE)  
+max_d <- max(values(res_dpa), na.rm = TRUE) 
+min_scale2 <- 0
+max_scale2 <- 100
+
+transform_distance <- function(distance, min_dist, max_dist, min_resist, max_resist) {
+  return(((distance - min_dist) / (max_dist - min_dist)) * (max_resist - min_resist) + min_resist)
+}
+
+res_dpa$resistance <- transform_distance(values(res_d_pa_centro), 
+                                                        min_d, max_d, 
+                                                        min_scale2, max_scale2)
+res_dpa <- res_dpa[["resistance"]]
+res_dpa <- resample(res_dpa, res_pa, method = "near")
+#writeRaster(res_dpa, "next/res_dpa.tif")
+
+
+##############################################################
+####################### connectivity #########################
+
+# Phase 1: Generate common conductance components 
+
+res_AOH_richness <- rast("next/res_AOH_richness.tif")
+res_rli <- rast("next/res_rli_index.tif")
+res_dpa <- rast("next/res_dpa.tif")
+
+centro_ita <- vect("next/centro_ita.shp")
+centro_ita <- terra::project(centro_ita, crs(res_AOH_richness))
+centro_raster <- rasterize(centro_ita, res_AOH_richness)
+
+
+base_resistance <- res_AOH_richness + res_rli + res_dpa
+base_resistance <- crop(base_resistance, centro_raster)
+base_resistance <- mask(base_resistance, centro_raster)
+base_resistance <- raster(base_resistance)
+plot(base_resistance)
+
+base_conductance <- 1 / base_resistance
+base_conductance[is.na(base_conductance)] <- 1e-10
+base_conductance[!is.finite(base_conductance)] <- 1e10
+
+# Create common transition object
+base_tr <- transition(base_conductance, transitionFunction = mean, directions = 8)
+base_tr <- geoCorrection(base_tr, type = "c")
+saveRDS(base_tr, "base_tr.rds")
+gc()
+
+
+# Phase 2: Generate nodes and species-specific resistance layers
+aoh_folder <- "next/AOH_centro_all"
+raster_files <- list.files(aoh_folder, pattern = "\\.tif$", full.names = TRUE)
+names(raster_files) <- gsub(".*/([^/]+)\\.tif$", "\\1", raster_files)
+raster_files <- raster_files[1:5]
+
+wdpa <- vect("next/wdpa_centro_nodi.shp")
+wdpa <- terra::project(wdpa, "EPSG:4326")
+wdpa <- makeValid(wdpa)
+
+
+wdpa_res <- vect("next/wdpa_centro.shp")
+wdpa_res <- terra::project(wdpa_res, crs("EPSG:4326"))
+wdpa_res <- makeValid(wdpa_res)
+
+wdpa_res$resistance <- ifelse(grepl("National Park", wdpa_res$DESIG_E), 20,
+                              ifelse(grepl("Regional/Provincial Nature Park", wdpa_res$DESIG_E), 40, 80))
+
+template_raster <- rast(raster_files[[1]])
+pa_raster <- rasterize(wdpa_res, template_raster, field = "resistance", touches = TRUE)
+pa_raster[is.na(pa_raster)] <- 100
+plot(pa_raster)
+
+### aggiungo iba
+
+iba <- vect("next/iba_centro.shp") %>%  
+  terra::project("EPSG:4326") %>% 
+  makeValid()
+
+iba$resistance <- 60
+iba_raster <- rasterize(iba, template_raster, field = "resistance", touches = TRUE)  
+
+pa_raster <- ifel(pa_raster > 60 & !is.na(iba_raster), 60, pa_raster)
+plot(pa_raster)
+
+
+centro_ita <- vect("next/centro_ita.shp")
+centro_ita <- terra::project(centro_ita, crs("EPSG:4326"))
+centro_raster <- rasterize(centro_ita, template_raster)
+plot(centro_raster)
+
+
+nodi_list <- list()
+for (i in seq_along(raster_files)) {
+  species_name <- names(raster_files)[i]
+  
+  cat("Processing:", species_name, "\n")
+  res_AOH_sp <- rast(raster_files[i])
+  
+  extracted <- terra::extract(res_AOH_sp, wdpa, touches = TRUE)
+  protected_ids <- unique(extracted[extracted[, 2] == 1, 1])
+  overlapping_areas <- wdpa[protected_ids, ]
+  
+  if (nrow(overlapping_areas) > 0) {
+    centroidi <- centroids(overlapping_areas)
+    centroidi_vals <- terra::extract(centro_raster, centroidi)
+    valid_centroidi <- !is.na(centroidi_vals[, 2])
+    centroidi <- centroidi[valid_centroidi, ]
+    nodi_list[[i]] <- data.frame(
+      species = species_name,
+      x = crds(centroidi)[, 1],
+      y = crds(centroidi)[, 2]
+    )
+    
+    overlapping_areas$resistance <- 0
+    nodi_raster <- rasterize(overlapping_areas, template_raster, field = "resistance", touches = TRUE)
+    res_pa_species <- ifel(!is.na(nodi_raster), 0, pa_raster)
+    
+    res_AOH_sp <- ifel(is.na(res_AOH_sp), 100, 0)
+    
+    res_final <- res_AOH_richness + res_rli + res_dpa + res_pa_species + res_AOH_sp
+    
+    res_final <- crop(res_final, centro_raster)
+    res_final <- mask(res_final, centro_raster)
+    
+    
+    writeRaster(res_final, filename = paste0("res_rasters/res_", species_name, ".tif"), overwrite = TRUE)
+  }
+  gc()
+  
+}
+
+nodi_list <- do.call(rbind, nodi_list)
+write.csv(nodi_list, "res_rasters/nodi_list.csv")
+
+# Phase 3: Calculate connectivity using efficient transition layer creation
+for (species_name in unique(nodi_list$species)) {
+  cat("Calculating connectivity for:", species_name, "\n")
+  
+  # Get species points
+  p <- nodi_list[nodi_list$species == species_name, c("x", "y")]
+  if (nrow(p) < 2) {
+    cat("  Skipping", species_name, "- insufficient points\n")
+    next
+  }
+  
+  # Load base transition object (already geocorrected)
+  base_tr <- readRDS("base_tr.rds")
+  
+  # Load species-specific resistance
+  resistance_file <- paste0("res_rasters/res_", species_name, ".tif")
+  if (!file.exists(resistance_file)) {
+    cat("  Skipping", species_name, "- resistance file not found\n")
+    next
+  }
+  
+  resistance <- raster(resistance_file)
+  
+  # Create species-specific modifier
+  species_modifier <- resistance - base_resistance
+  species_conductance_modifier <- exp(-species_modifier/100)  # Transform to multiplicative modifier
+  species_conductance_modifier[is.na(species_conductance_modifier)] <- 1e-10
+  species_conductance_modifier[!is.finite(species_conductance_modifier)] <- 1
+  
+  # Apply species-specific modifier to base transition matrix
+  tr <- base_tr
+  modifier_tr <- transition(species_conductance_modifier, transitionFunction = mean, directions = 8)
+  tr@transitionMatrix <- tr@transitionMatrix * modifier_tr@transitionMatrix
+  
+  tryCatch({
+    cost_matrix <- gdistance::costDistance(tr, as.matrix(p))
+    tsp <- TSP(cost_matrix)
+    tour <- solve_TSP(tsp)
+    opt_order <- as.integer(tour)
+    all_paths <- list()  
+    
+    for(i in 1:((nrow(p)) - 1)) {
+      path <- gdistance::shortestPath(
+        tr,
+        as.numeric(p[opt_order[i], ]),      
+        as.numeric(p[opt_order[i + 1], ]),  
+        output = "SpatialLines"  
+      )
+      all_paths[[i]] <- st_as_sf(path)
+    }    
+    
+    if (length(all_paths) > 0) {
+      all_paths_sf <- do.call(rbind, all_paths)
+      output_file <- paste0("paths_", species_name, ".shp")
+      if (file.exists(output_file)) {
+        cat("  Output file exists, overwriting\n")
+      }
+      st_write(all_paths_sf, output_file, delete_dsn = TRUE)
+      cat("  Path calculation completed and saved\n")
+    } else {
+      cat("  No valid paths found\n")
+    }
+  }, error = function(e) {
+    cat("  Error processing", species_name, ":", e$message, "\n")
+  })
+  
+  # Force garbage collection
+  gc()
+}
+
+res <- rast("res_rasters/res_Accipiter_gentilis.tif")
+prova <- vect("paths_Accipiter_gentilis.shp")
+
+plot(res)
+plot(prova, col = "red", lwd = 2, add = TRUE)  
+p <- nodi_list[nodi_list$species == "Accipiter_gentilis"]
+
+
+
+
+########### prova single species
+
+resistance <- raster("res_rasters/res_Accipiter_nisus.tif")
+p <- nodi_list[nodi_list$species == "Accipiter_nisus", c("x", "y")]
+
+base_tr <- readRDS("base_tr.rds")
+
+species_modifier <- resistance - base_resistance
+species_conductance_modifier <- exp(-species_modifier/100)  # Transform to multiplicative modifier
+species_conductance_modifier[is.na(species_conductance_modifier)] <- 1e-10
+species_conductance_modifier[!is.finite(species_conductance_modifier)] <- 1
+
+# Apply species-specific modifier to base transition matrix
+tr <- base_tr
+modifier_tr <- transition(species_conductance_modifier, transitionFunction = mean, directions = 8)
+tr@transitionMatrix <- tr@transitionMatrix * modifier_tr@transitionMatrix
+gc()
+cost_matrix <- gdistance::costDistance(tr, as.matrix(p))
+tsp <- TSP(cost_matrix)
+tour <- solve_TSP(tsp)
+opt_order <- as.integer(tour)
+all_paths <- list()  
+  
+for(i in 1:((nrow(p)) - 1)) {
+  path <- gdistance::shortestPath(
+     tr,
+    as.numeric(p[opt_order[i], ]),      
+    as.numeric(p[opt_order[i + 1], ]),  
+    output = "SpatialLines"  
+  )
+  all_paths[[i]] <- st_as_sf(path)
+}    
+  
+if (length(all_paths) > 0) {
+ all_paths_sf <- do.call(rbind, all_paths)
+ output_file <- paste0("paths_", species_name, ".shp")
+ st_write(all_paths_sf, output_file, delete_dsn = TRUE)
+}
+??transition
+prova <- transition(resistance, transitionFunction = mean, directions = 8)
+
+
