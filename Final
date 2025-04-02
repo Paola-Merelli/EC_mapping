@@ -823,3 +823,10 @@ if (length(all_paths_combined) > 0) {
   st_write(all_paths_combined, "paths_nt_cm_Accipiter_nisus.shp", delete_dsn = TRUE)
 }
 
+
+
+plot(rast(resistance))
+for (path in all_paths_combined) {
+  plot(path, col = "red", lwd = 2, add = TRUE)  
+}
+points(p, col = "blue", pch = 16, cex = 0.8)
