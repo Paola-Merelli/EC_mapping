@@ -1,1 +1,431 @@
-hh
+# final. species specific on Italy for birds
+
+# input data: - world AOH maps for Birds; - protected areas layer form WDPA, and IBAs from LIPU
+
+# Step 0 : process and prepare input data (AOH and wdpa)
+# step 1 : Common Conductance
+# Step 2 : spSpecific Conductance and nodes
+# Step 3 : connectivity
+# Step 4 : overlapping
+
+
+
+############################################ Step 0 ###############################################
+#################### AOH ##################
+
+# AOH downloaded from dryads how to obtain a folder of AOH cropped on Italian territory + transboundary buffer. 
+
+# codice per filtrare i file AOH con extent europea e cropparli -> EU_final da cui partire per poi filtrare i vari paesi
+
+### su locale
+
+# from all -> intersected with ext(eu_admin_no_beyond.shp)
+library(terra)
+library(sf)
+library(dplyr)
+setwd("D:/")
+
+eu <- vect("corridors/europe_admin_wgs/eu_admin_nobeyond_wgs.shp")
+eu <- project(eu, "EPSG:4326")
+crs(eu)
+eu_extent <- ext(eu)
+
+prova_crs <- rast("corridors/AOH/Extracted/Birds_migratory_accipitriformes/Accipiter_badius_B.tif")
+crs(prova_crs)
+
+
+base_path <- "corridors/AOH/Extracted/"
+ordini <- list.dirs(base_path, recursive = FALSE)
+rasters_to_keep <- list()
+
+for (ordine in ordini) {
+  
+  raster_files <- list.files(ordine, pattern = "\\.tif$", full.names = TRUE)
+  
+  for (raster_file in raster_files) {
+    
+    r <- rast(raster_file)
+    
+    if (relate(ext(r), eu_extent, "intersects")) {
+      rasters_to_keep <- append(rasters_to_keep, raster_file)
+    }
+  }
+}
+
+print(rasters_to_keep)
+
+# cosi ne seleziona 1020.  
+
+
+
+##### croppo i file all'extent eu
+
+output_folder <- "corridors/AOH/EU_final/"
+dir.create(output_folder, recursive =T)
+
+europe_mask <- vect("corridors/europe_admin_wgs/eu_admin_nobeyond_wgs.shp")
+
+# Funzione per processare e salvare un singolo raster
+process_raster <- function(raster_path, mask, output_folder) {
+  tryCatch({
+    # Carica il raster
+    r <- rast(raster_path)
+    
+    # Croppa e maschera il raster
+    cropped_raster <- crop(r, mask, snap = "out")  # Croppa il raster
+    masked_raster <- mask(cropped_raster, mask)    # Applica la maschera
+    
+    # Definisci il percorso di salvataggio
+    output_path <- file.path(output_folder, basename(raster_path))
+    
+    # Salva il raster clippato
+    writeRaster(masked_raster, output_path, overwrite = TRUE)
+    
+    # Rimuovi il raster dall'ambiente per liberare memoria
+    rm(r, cropped_raster, masked_raster)
+    gc()  # Richiama la garbage collection per liberare memoria
+    
+    message("Processed: ", raster_path)
+  }, error = function(e) {
+    message("Error processing: ", raster_path, " - ", e)
+  })
+}
+
+# Applica la funzione a tutti i file raster
+lapply(rasters_to_keep, process_raster, mask = europe_mask, output_folder = output_folder)
+
+
+
+
+## su server
+
+
+# filtro AOH_EU == 1 per paese. ex ita
+library(terra)
+library(raster)
+
+#setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
+
+input_folder <- "EU_final/"  
+output_folder <- "IT_AOH/"
+dir.create(output_folder, recursive = F)
+
+raster_files <- list.files(input_folder, pattern = "\\.tif$", full.names = TRUE)
+length(raster_file)
+ita_mask <- vect("IT/data_input/italian_territory.shp")
+print(crs(ita_mask))
+test <- rast(raster_files[1])
+crs(ita_mask) == crs(test)
+
+# Lista dei file raster (primi 10)
+rasters_to_keep <- list()
+
+for (raster_file in raster_files) {
+  cat("Processing:", raster_file, "\n")
+  
+  r <- rast(raster_file)
+  
+  # Check CRS compatibility
+  if (!crs(ita_mask) == crs(r)) {
+    cat("Skipping raster: CRS not compatible with ita_mask\n")
+    next
+  }
+  
+  # Check if extents intersect
+  if (!relate(ext(r), ext(ita_mask), "intersects")) {
+    cat("Skipping raster: no intersection with ita_mask\n")
+    next
+  }
+  
+  # Apply the mask
+  r_masked <- mask(r, ita_mask)
+  
+  # Calculate global sum and check for valid values
+  sum_values <- unlist(global(r_masked == 1, fun = "sum", na.rm = TRUE)) # Convert list to numeric
+  
+  cat("Sum values:", sum_values, "\n")
+  
+  if (!is.na(sum_values) && sum_values > 0) {
+    rasters_to_keep <- c(rasters_to_keep, raster_file)
+  }
+  
+  gc()
+}
+
+for (raster_file in rasters_to_keep) {
+  # Definisci il percorso di destinazione per ciascun file
+  destination_file <- file.path(output_folder, basename(raster_file))
+  
+  # Copia il file
+  if (file.copy(raster_file, destination_file, overwrite = TRUE)) {
+    cat("Copied:", raster_file, "to", destination_file, "\n")
+  } else {
+    cat("Failed to copy:", raster_file, "\n")
+  }
+}
+
+
+
+
+# uniformo ext su paese. ex ita
+library(terra)
+library(raster)
+
+#setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
+
+input_folder <- "IT_AOH/"  
+# folder with all AOH files having 1 on italy but still at random ext on EU
+
+ita_mask_path <- "prenodi/prova_transboundary/ita_30_trans_wgs.shp" 
+output_folder <- "IT_AOH_cropped/"  
+num_cores <- 8
+
+file_chunks <- split(raster_files, cut(seq_along(raster_files), num_cores, labels = FALSE))
+
+process_chunk <- function(chunk_files) {
+  library(terra)
+  ita_mask <- terra::vect(ita_mask_path)
+  template_extent <- ext(ita_mask)
+  template <- rast(template_extent, resolution = c(0.0009920726, 0.0009920815))
+  crs(template) <- crs(ita_mask)
+  template[] <- 1
+  
+  results <- character()
+  
+  for (raster_file in chunk_files) {
+    result <- tryCatch({
+      r <- terra::rast(raster_file)
+      r_resampled <- terra::resample(r, template)
+      r_extended <- terra::extend(r_resampled, ita_mask)
+      r_cropped <- terra::crop(r_extended, ita_mask)
+      r_masked <- terra::mask(r_cropped, ita_mask)
+      r_final <- terra::classify(r_masked, rbind(c(-Inf, 0, NA), c(1, 1, 1), c(1.0001, Inf, NA)))
+      terra::coltab(r_final) <- NULL
+      output_file <- file.path(output_folder, basename(raster_file))
+      terra::writeRaster(r_final, output_file, overwrite = TRUE, datatype = "INT1U")
+      
+      r <- NULL
+      r_resampled <- NULL
+      r_masked <- NULL
+      r_cropped <- NULL
+      r_extended <- NULL
+      r_final <- NULL
+      gc()
+      
+      paste("Successfully processed:", raster_file)
+    }, error = function(e) {
+      paste("Error processing", raster_file, ":", e$message)
+    })
+    
+    results <- c(results, result)
+  }
+  
+  return(results)
+}
+cl <- makeCluster(num_cores)
+
+clusterExport(cl, c("ita_mask_path", "output_folder", "process_chunk"))
+clusterEvalQ(cl, library(terra))
+gc()
+all_results <- parLapply(cl, file_chunks, process_chunk)
+stopCluster(cl)
+all_results <- unlist(all_results)
+
+
+
+############ uniformo BNR
+
+raster_files <- list.files("IT_AOH_cropped/", pattern = "\\.tif$", full.names = TRUE)
+species_names <- unique(gsub("_[NRB]\\.tif$|\\.tif$", "", basename(raster_files)))
+output_folder <- "IT_AOH_final_trans/"
+num_cores <- 8
+species_chunks <- split(species_names, cut(seq_along(species_names), num_cores, labels = FALSE))
+
+process_species_chunk <- function(species_chunk) {
+  library(terra)
+  
+  results <- character()
+  
+  for (species in species_chunk) {
+    result <- tryCatch({
+      species_rasters <- raster_files[grepl(paste0("^", species, "(_[NRB])?\\.tif$"), basename(raster_files))]
+      
+      if (length(species_rasters) > 1) {
+        rasters <- lapply(species_rasters, rast)
+        merged_raster <- Reduce(function(x, y) sum(x, y, na.rm = TRUE), rasters)
+        merged_raster[merged_raster > 1] <- 1
+        
+      } else if (length(species_rasters) == 1) {
+        merged_raster <- rast(species_rasters)
+      } else {
+        return(paste("No rasters found for species:", species))
+      }
+      
+      output_file <- file.path(output_folder, paste0(species, ".tif"))
+      writeRaster(merged_raster, output_file, overwrite = TRUE)
+      
+      merged_raster <- NULL
+      gc()
+      
+      paste("Successfully processed species:", species)
+    }, error = function(e) {
+      paste("Error processing species:", species, "-", e$message)
+    })
+    
+    results <- c(results, result)
+  }
+  
+  return(results)
+}
+cl <- makeCluster(num_cores)
+clusterExport(cl, c("raster_files", "output_folder", "process_species_chunk"))
+all_results <- parLapply(cl, species_chunks, process_species_chunk)
+stopCluster(cl)
+
+
+# vedi all per analisi su n aree protette per specie, % di copertura per specie
+
+###################  WDPA ##########################
+
+wdpa_dir <- "prenodi/prova_transboundary/wdpa_all/"
+wdpa_files <- list.files(wdpa_dir, pattern = "\\.shp$", full.names = T)
+wdpa <- lapply(wdpa_files, vect)
+wdpa_all <- do.call(rbind, wdpa)
+wdpa_all <- makeValid(wdpa_all)
+ita_10_trans <- terra::project(ita_10_trans, crs("EPSG:3035"))
+ita_10_trans <- makeValid(ita_10_trans)
+
+wdpa_10_trans <- crop(wdpa_all, ita_10_trans)
+wdpa_10_trans <- mask(wdpa_10_trans, ita_10_trans)
+
+plot(wdpa_10_trans)
+
+names(wdpa_10_trans)
+
+wdpa_filtered <- wdpa_10_trans[!(wdpa_10_trans$MARINE == "marine" | 
+                                   grepl("Birds Directive", wdpa_10_trans$DESIG_E) | 
+                                   grepl("Habitats Directive", wdpa_10_trans$DESIG_E)), ]
+
+wdpa_sf <- st_as_sf(wdpa_filtered)
+wdpa_sf$group_id <- 1:nrow(wdpa_sf)
+dissolve_connected_components <- function(sf_layer) {
+  # Trova solo quelli che si toccano (no sovrapposizione)
+  neighbors <- st_touches(sf_layer)
+  
+  group <- rep(NA_integer_, length(neighbors))
+  current_group <- 1
+  
+  for (i in seq_along(neighbors)) {
+    if (is.na(group[i])) {
+      # BFS per propagare il gruppo
+      to_visit <- c(i)
+      while (length(to_visit) > 0) {
+        idx <- to_visit[1]
+        to_visit <- to_visit[-1]
+        if (is.na(group[idx])) {
+          group[idx] <- current_group
+          new_neighbors <- neighbors[[idx]]
+          to_visit <- c(to_visit, new_neighbors[is.na(group[new_neighbors])])
+        }
+      }
+      current_group <- current_group + 1
+    }
+  }
+  
+  cat("Totale gruppi trovati:", length(unique(group)), "\n")
+  sf_layer$group_id <- group
+  
+  dissolved <- sf_layer %>%
+    group_by(group_id) %>%
+    summarise(geometry = st_union(geometry), .groups = "drop")
+  
+  return(dissolved)
+}
+wdpa_dissolved <- dissolve_connected_components(wdpa_sf)
+
+st_write(wdpa_dissolved, "prenodi/prova_transboundary/wdpa_nodi_final_10_tr.shp", overwrite= T)
+
+wdpa_con <- wdpa_10_trans[!(wdpa_10_trans$MARINE == "marine" )]
+plot(wdpa_con)
+writeVector(wdpa_con, "prenodi/prova_transboundary/wdpa_con_final_10_tr.shp", overwrite= T)
+
+
+########################################################## Step 1 #####################################################
+############################ AOH Richness
+raster_files <- list.files("IT_AOH_final_trans/", pattern = "\\.tif$", full.names = TRUE)
+
+template_file <- rast(raster_files[1])
+template_file[] <- 0
+plot(template_file)
+
+num_cores <- 8
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+chunk_size <- ceiling(length(raster_files) / num_cores)
+file_chunks <- split(raster_files, ceiling(seq_along(raster_files) / chunk_size))
+
+temp_dir <- "temp_rasters"
+#dir.create(temp_dir, showWarnings = FALSE)
+
+partial_results <- foreach(i = seq_along(file_chunks), 
+                           .packages = c("terra")) %dopar% {
+                            chunk <- file_chunks[[i]]
+                             
+                            local_template <- rast(chunk[1])
+                            local_template <- 0
+                            partial_sum <- local_template
+                            
+                            for (file in chunk) {
+                               aoh_raster <- rast(file)
+                               aoh_raster[is.na(aoh_raster)] <- 0
+                               partial_sum <- partial_sum + aoh_raster
+                               rm(aoh_raster)
+                               gc()
+                             }
+                             
+                             temp_file <- file.path(temp_dir, paste0("partial_", i, ".tif"))
+                             writeRaster(partial_sum, temp_file, overwrite = TRUE)
+                             return(temp_file)
+                           }
+
+stopCluster(cl)
+for (temp_file in partial_results) {
+  if (file.exists(temp_file)) {
+    partial_raster <- rast(temp_file)
+    AOH_richness <- template_file + partial_raster
+    rm(partial_raster)
+    file.remove(temp_file)
+    gc()
+  } else {
+    warning(paste("File not found:", temp_file))
+  }
+}
+unlink(temp_dir, recursive = TRUE)
+
+plot(AOH_richness)
+head(AOH_richness)
+
+
+min_r <- min(values(AOH_richness), na.rm = TRUE)  
+max_r <- max(values(AOH_richness), na.rm = TRUE)  
+min_scale <- 0
+max_scale <- 100
+
+con_rescaling <- function(richness, min_r, max_r, min_res, max_res) {
+  return(((richness - min_r) / (max_r - min_r)) * (max_res - min_res) + min_res)
+}
+
+AOH_richness$conductance <- con_rescaling(values(AOH_richness), 
+                                         min_r, max_r, 
+                                         min_scale, max_scale)
+
+plot(AOH_richness$conductance)
+
+AOH_richness <- AOH_richness[["conductance"]]
+
+#writeRaster(AOH_richness, "final/con_AOH_richness.tif")
+
+
+
+
