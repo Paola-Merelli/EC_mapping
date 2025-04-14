@@ -285,6 +285,10 @@ stopCluster(cl)
 
 # vedi all per analisi su n aree protette per specie, % di copertura per specie
 
+
+
+
+
 ###################  WDPA ##########################
 
 wdpa_dir <- "prenodi/prova_transboundary/wdpa_all/"
@@ -304,7 +308,8 @@ names(wdpa_10_trans)
 
 wdpa_filtered <- wdpa_10_trans[!(wdpa_10_trans$MARINE == "marine" | 
                                    grepl("Birds Directive", wdpa_10_trans$DESIG_E) | 
-                                   grepl("Habitats Directive", wdpa_10_trans$DESIG_E)), ]
+                                   grepl("Habitats Directive", wdpa_10_trans$DESIG_E)) |
+                                   grepl("SVI", wdpa_10_trans$ISO3), ]
 
 wdpa_sf <- st_as_sf(wdpa_filtered)
 wdpa_sf$group_id <- 1:nrow(wdpa_sf)
@@ -345,7 +350,8 @@ wdpa_dissolved <- dissolve_connected_components(wdpa_sf)
 
 st_write(wdpa_dissolved, "prenodi/prova_transboundary/wdpa_nodi_final_10_tr.shp", overwrite= T)
 
-wdpa_con <- wdpa_10_trans[!(wdpa_10_trans$MARINE == "marine" )]
+wdpa_con <- wdpa_10_trans[!(wdpa_10_trans$MARINE == "marine" )|
+                           grepl("SVI"], wdpa_10_trans$ISO3
 plot(wdpa_con)
 writeVector(wdpa_con, "prenodi/prova_transboundary/wdpa_con_final_10_tr.shp", overwrite= T)
 
