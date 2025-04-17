@@ -283,7 +283,7 @@ all_results <- parLapply(cl, species_chunks, process_species_chunk)
 stopCluster(cl)
 
 
-# vedi all per analisi su n aree protette per specie, % di copertura per specie
+# vedi "all" per analisi su n aree protette per specie, % di copertura per specie
 
 
 
@@ -356,7 +356,7 @@ plot(wdpa_con)
 writeVector(wdpa_con, "prenodi/prova_transboundary/wdpa_con_final_10_tr.shp", overwrite= T)
 
 
-########################################################## Step 1 #####################################################
+############################################ Step 1 : Common conductance #####################################################
 ############################ AOH Richness
 raster_files <- list.files("IT_AOH_final_trans/", pattern = "\\.tif$", full.names = TRUE)
 
@@ -432,6 +432,270 @@ AOH_richness <- AOH_richness[["conductance"]]
 
 #writeRaster(AOH_richness, "final/con_AOH_richness.tif")
 
+
+
+
+
+
+############################### res_rli
+
+
+species_data <- read.csv("final/species_iucn.csv") 
+species_data$Scientific.name <- gsub(" ", "_", species_data$Scientific.name)
+iucn_weights <- c("LC" = 0, "NT" = 1, "VU" = 2, "EN" = 3, "CR" = 4, "EX" = 5)
+species_data$weight <- iucn_weights[species_data$RL.Category]
+
+num_cores <- detectCores() - 8
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Dividi i file in chunks
+chunk_size <- ceiling(length(raster_files) / num_cores)
+file_chunks <- split(raster_files, ceiling(seq_along(raster_files) / chunk_size))
+
+# Crea cartella temporanea
+temp_dir <- "temp_rasters_iucn"
+dir.create(temp_dir, showWarnings = FALSE)
+
+# Elabora i chunks in parallelo
+partial_results <- foreach(i = seq_along(file_chunks), 
+                           .packages = c("terra", "tools"),
+                           .export = c("species_data", "iucn_weights", "temp_dir")) %dopar% {
+                             
+                             chunk <- file_chunks[[i]]
+                             
+                             # Crea template dal primo file del chunk
+                             template_file <- rast(chunk[1])
+                             
+                             # Inizializza i raster per questo worker
+                             weight_sum <- template_file
+                             species_count <- template_file
+                             values(weight_sum) <- 0
+                             values(species_count) <- 0
+                             
+                             for (file in chunk) {
+                               species_name <- file_path_sans_ext(basename(file))
+                               
+                               # Elabora solo se la specie è nei dati IUCN
+                               weight_idx <- which(species_data$Scientific.name == species_name)
+                               
+                               if (length(weight_idx) == 1) {
+                                 weight <- species_data$weight[weight_idx]
+                                 
+                                 # Carica e processa il raster
+                                 aoh_raster <- rast(file)
+                                 aoh_raster[is.na(aoh_raster)] <- 0
+                                 
+                                 # Aggiorna i conteggi
+                                 weight_sum <- weight_sum + (aoh_raster * weight)
+                                 species_count <- species_count + aoh_raster
+                                 
+                                 # Pulizia memoria
+                                 rm(aoh_raster)
+                                 gc()
+                               }
+                             }
+                             
+                             # Salva i risultati parziali
+                             weight_file <- file.path(temp_dir, paste0("weight_", i, ".tif"))
+                             count_file <- file.path(temp_dir, paste0("count_", i, ".tif"))
+                             
+                             writeRaster(weight_sum, weight_file, overwrite = TRUE)
+                             writeRaster(species_count, count_file, overwrite = TRUE)
+                             
+                             return(list(weight_file = weight_file, count_file = count_file))
+                           }
+
+stopCluster(cl)
+
+sum_weights_raster <- template_file
+species_count_raster <- template_file
+for (result in partial_results) {
+  if (file.exists(result$weight_file)) {
+    partial_weight <- rast(result$weight_file)
+    sum_weights_raster <- sum_weights_raster + partial_weight
+    rm(partial_weight)
+    file.remove(result$weight_file)
+  } else {
+    warning(paste("Weight file not found:", result$weight_file))
+  }
+  
+  if (file.exists(result$count_file)) {
+    partial_count <- rast(result$count_file)
+    species_count_raster <- species_count_raster + partial_count
+    rm(partial_count)
+    file.remove(result$count_file)
+  } else {
+    warning(paste("Count file not found:", result$count_file))
+  }
+  
+  gc()
+}
+unlink(temp_dir, recursive = TRUE)
+
+plot(sum_weights_raster)
+plot(species_count_raster)
+max_weight_raster <- species_count_raster * 5  
+rli_raster <- 1 - (sum_weights_raster / max_weight_raster)
+plot(rli_raster)
+rli_raster[is.na(rli_raster)] <- NA
+
+min_r <- min(values(rli_raster), na.rm = TRUE)  
+max_r <- max(values(rli_raster), na.rm = TRUE)  
+min_scale <- 0
+max_scale <- 100
+
+inv_con_rescaling <- function(richness, min_r, max_r, min_res, max_res) {
+  return(((max_r - richness) / (max_r - min_r)) * (max_res - min_res) + min_res)
+}
+
+rli_raster$conductance <- inv_con_rescaling(values(rli_raster), 
+                                          min_r, max_r, 
+                                          min_scale, max_scale)
+
+plot(rli_raster$conductance)
+
+rli_raster <- rli_raster[["conductance"]]
+
+#writeRaster(rli_raster, "con_RLI_Index.tif", overwrite = TRUE)
+
+
+
+
+################################ res_dpa
+
+ita <- vect(ita_mask_path)
+wdpa_con <- vect("prenodi/prova_transboundary/wdpa_con_final_30_tr.shp")
+iba <- vect("final/IBAsGlobal_2024_September_03/IBAsGlobal_2024_September_POL_03.shp")
+iba_ita <- crop(iba, ita)
+iba_ita <- mask(iba_ita, ita)
+iba_ita <- terra::project(iba_ita, crs("EPSG:3035"))
+ita_pa <- rbind(wdpa_con, iba_ita)
+template_file <- terra::project(template_file, crs("EPSG:3035"))
+ita <- terra::project(ita, crs("EPSG:3035"))
+ita_raster <- rasterize(ita, template_file, field = 1)
+crs(ita_raster)
+ita_pa_raster <- rasterize(ita_pa, template_file, field = 1)
+plot(ita_pa_raster)
+res_dpa <- terra::distance(ita_pa_raster)
+res_dpa <- mask(res_dpa, ita_raster)
+res_dpa <- res_dpa / 1000
+plot(res_dpa)
+
+min_d <- min(values(res_dpa), na.rm = TRUE)  
+max_d <- max(values(res_dpa), na.rm = TRUE) 
+min_scale2 <- 0
+max_scale2 <- 100
+
+
+inv_con_rescaling <- function(distance, min_d, max_d, min_res, max_res) {
+  return(((max_d - distance) / (max_d - min_d)) * (max_res - min_res) + min_res)
+}
+
+res_dpa$conductance <- inv_con_rescaling(values(res_dpa), 
+                                            min_d, max_d, 
+                                            min_scale2, max_scale2)
+
+res_dpa <- res_dpa[["conductance"]]
+res_dpa <- terra::project(res_dpa, crs("EPSG:4326))
+plot(res_dpa)
+#writeRaster(res_dpa, "res_dpa.tif")
+
+
+
+
+############################## con_common
+
+#con_dpa <- rast("res_dpa.tif")
+#con_richness <- rast("con_AOH_richness.tif")
+#con_rli <- rast("con_RLI_Index.tif")
+#ita_mask_path <- "prenodi/prova_transboundary/ita_30_trans_wgs.shp"
+#ita <- vect(ita_mask_path)
+
+con_richness <- crop(con_richness, ita)
+con_richness <- mask(con_richness, ita)
+
+con_rli[is.na(con_rli)] <- 0
+con_rli <- crop(con_rli, ita)
+con_rli <- mask(con_rli, ita)
+
+con_dpa <- crop(con_dpa, ita)
+con_dpa <- mask(con_dpa, ita)
+
+ext(con_dpa) <- ext(con_richness)
+con_dpa <- resample(con_dpa, con_richness)
+con_common <- con_richness + con_rli + con_dpa
+writeRaster(con_common, "...")
+plot(con_common)
+
+
+
+
+
+############################################ Step 2 : spSpecific Conductance and nodes ###########################################
+aoh_folder <- "ITA_AOH_final_trans"
+raster_files <- list.files(aoh_folder, pattern = "\\.tif$", full.names = TRUE)
+ita <- vect("prenodi/prova_transboundary/ita_30_trans_wgs.shp")
+con_common <- rast("prenodi/prova_transboundary/con_common_trans_30.tif")
+
+wdpa_nodi <- vect("prenodi/prova_transboundary/wdpa_nodi_final_30_tr.shp") %>% terra::project(crs(AOH))
+wdpa_con <- vect("prenodi/prova_transboundary/wdpa_con_final_30_tr.shp") %>% terra::project(crs(AOH))
+
+wdpa_con$conductance <- ifelse(grepl("National Park", wdpa_con$DESIG_E), 80,
+                               ifelse(grepl("Regional/Provincial Nature Park", wdpa_con$DESIG_E), 60, 20))
+
+template <- rast(raster_files[1])
+pa_raster <- rasterize(wdpa_con, template, field = "conductance", touches = TRUE)
+pa_raster[is.na(pa_raster)] <- 0
+pa_raster <- pa_raster["conductance"]
+pa_raster <- crop(pa_raster, ita) %>% mask(ita)
+
+iba <- vect("final/IBAsGlobal_2024_September_03/IBAsGlobal_2024_September_POL_03.shp") %>%
+                                        crop(ita) %>%
+                                        mask(ita) %>% 
+                                        makeValid()
+
+
+iba$conductance <- 40
+iba_raster <- rasterize(iba, template, field = "conductance", touches = TRUE)  
+
+pa_raster <- ifel(pa_raster < 40 & !is.na(iba_raster), 40, pa_raster)
+pa_raster <- pa_raster["conductance"]
+plot(pa_raster)
+
+
+
+extracted <- terra::extract(AOH, wdpa_nodi, touches = TRUE)
+protected_ids <- unique(extracted[extracted[, 2] == 1, 1])
+overlapping_areas <- wdpa_nodi[protected_ids, ]
+
+centroidi <- centroids(overlapping_areas)
+centroidi_vals <- terra::extract(ita, centroidi)
+valid_centroidi <- !is.na(centroidi_vals[, 2])
+centroidi <- centroidi[valid_centroidi, ]
+  
+nodi_sf <- st_as_sf(centroidi)
+plot(nodi_sf, add = T)
+st_write(nodi_sf, "prenodi/prova_transboundary/nodi_Spinus_spinus_30_tr.shp")
+  
+overlapping_areas$conductance <- 100
+nodi_raster <- rasterize(overlapping_areas, AOH, field = "conductance", touches = TRUE)
+con_pa_species <- ifel(!is.na(nodi_raster), 100, pa_raster)
+con_AOH_sp <- ifel(is.na(AOH), 0, 100)
+
+
+con_common <- rast("prenodi/prova_transboundary/con_common_trans_30.tif")
+ext(con_common)
+con_sp_final <- con_common + con_pa_species + con_AOH_sp
+plot(con_sp_final)
+writeRaster(con_sp_final, "prenodi/prova_transboundary/con_final_Spinus_spinus_30_tr.tif", overwrite = TRUE)
+  
+  
+  
+  
+
+conductance <- raster("prenodi/prova_transboundary/con_final_Spinus_spinus_30_tr.tif")
+p <- vect("prenodi/prova_transboundary/nodi_Spinus_spinus_30_tr.shp")
 
 
 
