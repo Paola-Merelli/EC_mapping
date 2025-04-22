@@ -699,3 +699,270 @@ p <- vect("prenodi/prova_transboundary/nodi_Spinus_spinus_30_tr.shp")
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+n_cores <- detectCores() - 12
+cl <- makeCluster(n_cores)
+
+clusterEvalQ(cl, {
+  library(gdistance)
+  library(sf)
+  library(raster)  # Make sure raster is explicitly loaded
+  return(NULL)
+})
+
+
+conductance <- rast("prenodi/prova_transboundary/con_final_Spinus_spinus_30_tr.tif")
+values(conductance)[values(conductance) == 0] <- 1e-10
+p <- vect("nodi_Spinus_spinus_30_tr.shp")
+p <- terra::project(p, "EPSG:3035")
+conductance <- terra::project(conductance, "EPSG:3035")
+
+ita_10_tr <- vect("prenodi/prova_transboundary/ita_10_tr.shp")
+conductance <- crop(conductance, ita_10_tr)
+conductance <- mask(conductance, ita_10_tr)
+p <- crop(p, ita_10_tr)
+p <- mask(p, ita_10_tr)
+
+conductance_lowres <- terra::aggregate(conductance, fact=10, fun="mean")
+conductance_lowres <- raster(conductance_lowres)
+res(conductance_lowres)
+
+tr_low <- gdistance::transition(conductance_lowres, transitionFunction = mean, directions = 8)
+tr_low <- gdistance::geoCorrection(tr_low)
+gc()
+#saveRDS(tr, file = "tr_Spinus.rds")
+
+
+conductance <- raster(conductance)
+tr_high <- gdistance::transition(conductance, transitionFunction = mean, directions = 8)
+tr_high <- gdistance::geoCorrection(tr_high)
+gc()
+
+p_coords <- as.matrix(crds(p))
+
+points_df <- data.frame(
+  point_id = 1:nrow(p_coords),
+  x = p_coords[,1],
+  y = p_coords[,2]
+)
+
+points_df$x_round <- round(points_df$x, digits=6)
+points_df$y_round <- round(points_df$y, digits=6)
+
+# Identify duplicates
+duplicate_groups <- points_df %>%
+  group_by(x_round, y_round) %>%
+  filter(n() > 1) %>%
+  arrange(x_round, y_round)
+
+print(duplicate_groups)
+
+indices_to_keep <- 1:length(p)
+indices_to_keep <- indices_to_keep[indices_to_keep != 185]  # Remove point 140
+p_unique <- p[indices_to_keep]
+
+p_coords <- as.matrix(crds(p_unique))
+
+euclidean_dist <- dist(p_coords)
+euclidean_matrix <- as.matrix(euclidean_dist)
+
+# Find point pairs closer than 1km
+nearby_pairs <- which(euclidean_matrix < 2000 & euclidean_matrix > 0, arr.ind = TRUE)
+print(nearby_pairs)
+
+unique_pairs <- list(
+  c(160, 88),
+  c(123, 122), 
+  c(127, 126),
+  c(131, 127)
+)
+
+high_res_cost_df <- data.frame(
+  from_idx = integer(),
+  to_idx = integer(),
+  cost = numeric(),
+  stringsAsFactors = FALSE
+)
+for(pair in unique_pairs) {
+  from_idx <- pair[1]
+  to_idx <- pair[2]
+  
+  from_coords <- p_coords[from_idx, , drop=FALSE]
+  to_coords <- p_coords[to_idx, , drop=FALSE]
+  
+  # Calculate cost at high resolution
+  high_res_cost <- tryCatch({
+    cost <- gdistance::costDistance(tr_high, from_coords, to_coords)
+    print(paste("High resolution cost:", cost))
+    cost
+  }, error = function(e) {
+    print(paste("Error calculating cost:", e$message))
+    NA
+  })
+  
+  # Check if the cost is valid
+  if(is.na(high_res_cost) || high_res_cost == 0) {
+    print("WARNING: Invalid cost calculated!")
+  } else {
+    # Add this pair's cost to the data frame
+    high_res_cost_df <- rbind(high_res_cost_df, data.frame(
+      from_idx = from_idx,
+      to_idx = to_idx,
+      cost = as.numeric(high_res_cost)
+    ))
+  }
+  
+  print("-----------------------------------")
+}
+gc()
+print(high_res_cost_df)
+
+cost_matrix_low <- gdistance::costDistance(tr_low, p_coords)
+gc()
+max_val <- max(cost_matrix_low[is.finite(cost_matrix_low)], na.rm = TRUE)
+cost_matrix_low[!is.finite(cost_matrix_low)] <- max_val * 10
+#cost_matrix <- readRDS("cost_matrix_Spinus.rds")
+
+
+if(inherits(cost_matrix_low, "dist")) {
+  cost_matrix_mat <- as.matrix(cost_matrix_low)
+} else {
+  cost_matrix_mat <- cost_matrix_low
+}
+
+for(i in 1:nrow(high_res_cost_df)) {
+  from_idx <- high_res_cost_df$from_idx[i]
+  to_idx <- high_res_cost_df$to_idx[i]
+  cost_val <- high_res_cost_df$cost[i]
+  
+  # Update in both directions (symmetric matrix)
+  cost_matrix_mat[from_idx, to_idx] <- cost_val
+  cost_matrix_mat[to_idx, from_idx] <- cost_val
+}
+
+# Convert back to dist object if needed
+if(inherits(cost_matrix_low, "dist")) {
+  cost_matrix_final <- as.dist(cost_matrix_mat)
+} else {
+  cost_matrix_final <- cost_matrix_mat
+}
+
+calculate_mst <- function(cost_matrix) {
+  n <- nrow(cost_matrix)
+  
+  # Initialize arrays
+  parent <- integer(n)  # To store constructed MST
+  key <- rep(Inf, n)    # Key values used to pick minimum weight edge
+  included <- logical(n)  # To represent set of vertices included in MST
+  
+  # Always include the first vertex in MST (can be changed to south_index)
+  key[1] <- 0
+  parent[1] <- -1  # First node is always root of MST
+  
+  # The MST will have n-1 edges
+  for(count in 1:(n-1)) {
+    # Pick the minimum key vertex from the set of vertices not yet included in MST
+    min_key <- Inf
+    min_index <- 0
+    
+    for(v in 1:n) {
+      if(!included[v] && key[v] < min_key) {
+        min_key <- key[v]
+        min_index <- v
+      }
+    }
+    
+    # Add the picked vertex to the MST Set
+    included[min_index] <- TRUE
+    
+    # Update key value and parent index of adjacent vertices
+    for(v in 1:n) {
+      # Update only if v is not in MST, there is an edge, and edge weight is smaller than current key value
+      if(!included[v] && cost_matrix[min_index, v] < key[v]) {
+        parent[v] <- min_index
+        key[v] <- cost_matrix[min_index, v]
+      }
+    }
+  }
+  
+  # Return the parent array which defines the MST
+  return(parent)
+}
+
+clusterExport(cl, "calculate_mst")
+
+mst_parent <- calculate_mst(as.matrix(cost_matrix_final))
+
+
+clusterExport(cl, c("mst_parent", "p_unique"), envir = environment())
+saveRDS(p_unique, "p_temp.rds")
+saveRDS(tr_high, "tr_high_temp.rds")
+
+indices <- 2:length(mst_parent)
+
+clusterExport(cl, c("mst_parent", "indices"))
+all_paths <- parLapply(cl, indices, function(i) {
+  library(terra)
+  library(sf)
+  library(gdistance)
+  
+  p <- readRDS("p_temp.rds")
+  tr_high <- readRDS("tr_high_temp.rds")
+  
+  from_idx <- mst_parent[i]
+  to_idx <- i
+  
+  if (from_idx < 1) return(NULL)
+  
+  from_coords <- terra::crds(p[from_idx, ], df = TRUE)
+  to_coords <- terra::crds(p[to_idx, ], df = TRUE)
+  
+  from_cell <- raster::cellFromXY(raster(tr_high), from_coords)
+  to_cell <- raster::cellFromXY(raster(tr_high), to_coords)
+  
+  from_xy <- raster::xyFromCell(raster(tr_high), from_cell)
+  to_xy <- raster::xyFromCell(raster(tr_high), to_cell)
+  
+  # Safe call to shortestPath
+  path <- tryCatch({
+    gdistance::shortestPath(tr_high, from_xy, to_xy, output = "SpatialLines")
+  }, error = function(e) return(NULL))
+  
+  if (is.null(path)) return(NULL)
+  
+  # Check for valid bbox
+  bbox_vals <- sf::st_bbox(st_as_sfc(st_as_sf(path)))
+  if (any(!is.finite(bbox_vals))) return(NULL)
+  
+  return(st_as_sf(path))
+})
+stopCluster(cl)
+gc()
+
+all_paths_combined <- do.call(rbind, all_paths)
+if (length(all_paths_combined) > 0) {
+  st_write(all_paths_combined, "paths_Spinus_prova_hybrid_cost.shp", delete_dsn = TRUE)
+}
+
+
+
+plot(rast(conductance))
+for (path in all_paths_combined) {
+  plot(path, col = "red", lwd = 2, add = TRUE)  
+}
+points(p, col = "blue", pch = 16, cex = 0.8)
+
+
+
+
+
