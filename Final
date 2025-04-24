@@ -633,13 +633,94 @@ plot(con_common)
 
 
 ############################################ Step 2 : spSpecific Conductance and nodes ###########################################
-aoh_folder <- "ITA_AOH_final_trans"
-raster_files <- list.files(aoh_folder, pattern = "\\.tif$", full.names = TRUE)
-ita <- vect("prenodi/prova_transboundary/ita_30_trans_wgs.shp")
-con_common <- rast("prenodi/prova_transboundary/con_common_trans_30.tif")
+library(future)
+library(furrr)
 
-wdpa_nodi <- vect("prenodi/prova_transboundary/wdpa_nodi_final_30_tr.shp") %>% terra::project(crs(AOH))
-wdpa_con <- vect("prenodi/prova_transboundary/wdpa_con_final_30_tr.shp") %>% terra::project(crs(AOH))
+raster_files <- list.files("IT_AOH_final_trans/", pattern = "\\.tif$", full.names = TRUE)
+protected_areas <- vect("SCB/wdpa_nodi_final_30_tr.shp")
+test <- rast(raster_files[1])
+
+protected_areas <- terra::project(protected_areas, crs(test))
+crs(protected_areas) == crs(test)
+plot(protected_areas)
+plot(test, add = T)
+
+temp_pa_file <- tempfile(fileext = ".shp")
+writeVector(protected_areas, temp_pa_file)
+
+process_file <- function(file_path) {
+  tryCatch({
+    r <- rast(file_path)
+    extracted <- extract(r, protected_areas, touches = TRUE)
+    
+    # Count protected areas with habitat (value = 1)
+    count <- sum(
+      tapply(extracted[, 2], extracted[, 1], function(values) any(values == 1, na.rm = TRUE))
+    )
+    
+    return(count)
+  }, error = function(e) {
+    cat("Error processing", file_path, ":", conditionMessage(e), "\n")
+    return(NA)
+  })
+}
+
+cl <- makeCluster(10)
+clusterExport(cl, c("temp_pa_file"))
+clusterEvalQ(cl, {
+  library(terra)
+  protected_areas <- vect(temp_pa_file)
+  NULL
+})
+
+results <- parSapply(cl, raster_files, process_file)
+stopCluster(cl)
+
+# Create final dataframe
+percent_coverage_df <- data.frame(
+  species = basename(raster_files),
+  total_protected_areas = results
+)
+
+# Check result
+print(head(percent_coverage_df))
+
+nodes_df <- percent_coverage_df
+nodes_df <- nodes_df %>%
+  arrange(total_protected_areas)
+#write.csv(nodes_df, "SCB/nodes_df.csv")
+
+sp_list <- nodes_df["species"]
+sp_list <- sp_list[2:51,]
+head(sp_list)
+
+
+
+source_folder <- "IT_AOH_final_trans/"
+dest_folder <- "SCB/AOH/"
+dir.create(dest_folder, recursive = TRUE)
+all_files <- list.files(source_folder, full.names = FALSE)
+
+matching_files <- all_files[all_files %in% sp_list]
+
+for (file in matching_files) {
+  source_path <- file.path(source_folder, file)
+  dest_path <- file.path(dest_folder, file)
+  
+  file.copy(source_path, dest_path, overwrite = FALSE)
+  cat("Copied:", file, "\n")
+}
+
+
+
+
+aoh_folder <- "SCB/AOH/"
+raster_files <- list.files(aoh_folder, pattern = "\\.tif$", full.names = TRUE)
+ita <- vect("SCB/ita_30_trans_wgs.shp")
+con_common <- rast("SCB/con_common_trans_30.tif")
+
+wdpa_nodi <- vect("SCB/wdpa_nodi_final_30_tr.shp") %>% terra::project(crs(ita))
+wdpa_con <- vect("SCB/wdpa_con_final_30_tr.shp") %>% terra::project(crs(ita))
 
 wdpa_con$conductance <- ifelse(grepl("National Park", wdpa_con$DESIG_E), 80,
                                ifelse(grepl("Regional/Provincial Nature Park", wdpa_con$DESIG_E), 60, 20))
@@ -651,9 +732,9 @@ pa_raster <- pa_raster["conductance"]
 pa_raster <- crop(pa_raster, ita) %>% mask(ita)
 
 iba <- vect("final/IBAsGlobal_2024_September_03/IBAsGlobal_2024_September_POL_03.shp") %>%
-                                        crop(ita) %>%
-                                        mask(ita) %>% 
-                                        makeValid()
+  crop(ita) %>%
+  mask(ita) %>% 
+  makeValid()
 
 
 iba$conductance <- 40
@@ -661,306 +742,222 @@ iba_raster <- rasterize(iba, template, field = "conductance", touches = TRUE)
 
 pa_raster <- ifel(pa_raster < 40 & !is.na(iba_raster), 40, pa_raster)
 pa_raster <- pa_raster["conductance"]
-plot(pa_raster)
+#writeRaster(pa_raster, "SCB/pa_raster.tif")
+#writeRaster(template, "SCB/template.tif", overwrite=TRUE)
 
+raster_files <- list.files("SCB/AOH/", full.names = TRUE)
 
-
-extracted <- terra::extract(AOH, wdpa_nodi, touches = TRUE)
-protected_ids <- unique(extracted[extracted[, 2] == 1, 1])
-overlapping_areas <- wdpa_nodi[protected_ids, ]
-
-centroidi <- centroids(overlapping_areas)
-centroidi_vals <- terra::extract(ita, centroidi)
-valid_centroidi <- !is.na(centroidi_vals[, 2])
-centroidi <- centroidi[valid_centroidi, ]
-  
-nodi_sf <- st_as_sf(centroidi)
-plot(nodi_sf, add = T)
-st_write(nodi_sf, "prenodi/prova_transboundary/nodi_Spinus_spinus_30_tr.shp")
-  
-overlapping_areas$conductance <- 100
-nodi_raster <- rasterize(overlapping_areas, AOH, field = "conductance", touches = TRUE)
-con_pa_species <- ifel(!is.na(nodi_raster), 100, pa_raster)
-con_AOH_sp <- ifel(is.na(AOH), 0, 100)
-
-
-con_common <- rast("prenodi/prova_transboundary/con_common_trans_30.tif")
-ext(con_common)
-con_sp_final <- con_common + con_pa_species + con_AOH_sp
-plot(con_sp_final)
-writeRaster(con_sp_final, "prenodi/prova_transboundary/con_final_Spinus_spinus_30_tr.tif", overwrite = TRUE)
-  
-  
-  
-  
-
-conductance <- raster("prenodi/prova_transboundary/con_final_Spinus_spinus_30_tr.tif")
-p <- vect("prenodi/prova_transboundary/nodi_Spinus_spinus_30_tr.shp")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n_cores <- detectCores() - 12
-cl <- makeCluster(n_cores)
-
-clusterEvalQ(cl, {
-  library(gdistance)
-  library(sf)
-  library(raster)  # Make sure raster is explicitly loaded
-  return(NULL)
-})
-
-
-conductance <- rast("prenodi/prova_transboundary/con_final_Spinus_spinus_30_tr.tif")
-values(conductance)[values(conductance) == 0] <- 1e-10
-p <- vect("nodi_Spinus_spinus_30_tr.shp")
-p <- terra::project(p, "EPSG:3035")
-conductance <- terra::project(conductance, "EPSG:3035")
-
-ita_10_tr <- vect("prenodi/prova_transboundary/ita_10_tr.shp")
-conductance <- crop(conductance, ita_10_tr)
-conductance <- mask(conductance, ita_10_tr)
-p <- crop(p, ita_10_tr)
-p <- mask(p, ita_10_tr)
-
-conductance_lowres <- terra::aggregate(conductance, fact=10, fun="mean")
-conductance_lowres <- raster(conductance_lowres)
-res(conductance_lowres)
-
-tr_low <- gdistance::transition(conductance_lowres, transitionFunction = mean, directions = 8)
-tr_low <- gdistance::geoCorrection(tr_low)
-gc()
-#saveRDS(tr, file = "tr_Spinus.rds")
-
-
-conductance <- raster(conductance)
-tr_high <- gdistance::transition(conductance, transitionFunction = mean, directions = 8)
-tr_high <- gdistance::geoCorrection(tr_high)
-gc()
-
-p_coords <- as.matrix(crds(p))
-
-points_df <- data.frame(
-  point_id = 1:nrow(p_coords),
-  x = p_coords[,1],
-  y = p_coords[,2]
-)
-
-points_df$x_round <- round(points_df$x, digits=6)
-points_df$y_round <- round(points_df$y, digits=6)
-
-# Identify duplicates
-duplicate_groups <- points_df %>%
-  group_by(x_round, y_round) %>%
-  filter(n() > 1) %>%
-  arrange(x_round, y_round)
-
-print(duplicate_groups)
-
-indices_to_keep <- 1:length(p)
-indices_to_keep <- indices_to_keep[indices_to_keep != 185]  # Remove point 140
-p_unique <- p[indices_to_keep]
-
-p_coords <- as.matrix(crds(p_unique))
-
-euclidean_dist <- dist(p_coords)
-euclidean_matrix <- as.matrix(euclidean_dist)
-
-# Find point pairs closer than 1km
-nearby_pairs <- which(euclidean_matrix < 2000 & euclidean_matrix > 0, arr.ind = TRUE)
-print(nearby_pairs)
-
-unique_pairs <- list(
-  c(160, 88),
-  c(123, 122), 
-  c(127, 126),
-  c(131, 127)
-)
-
-high_res_cost_df <- data.frame(
-  from_idx = integer(),
-  to_idx = integer(),
-  cost = numeric(),
-  stringsAsFactors = FALSE
-)
-for(pair in unique_pairs) {
-  from_idx <- pair[1]
-  to_idx <- pair[2]
-  
-  from_coords <- p_coords[from_idx, , drop=FALSE]
-  to_coords <- p_coords[to_idx, , drop=FALSE]
-  
-  # Calculate cost at high resolution
-  high_res_cost <- tryCatch({
-    cost <- gdistance::costDistance(tr_high, from_coords, to_coords)
-    print(paste("High resolution cost:", cost))
-    cost
-  }, error = function(e) {
-    print(paste("Error calculating cost:", e$message))
-    NA
-  })
-  
-  # Check if the cost is valid
-  if(is.na(high_res_cost) || high_res_cost == 0) {
-    print("WARNING: Invalid cost calculated!")
-  } else {
-    # Add this pair's cost to the data frame
-    high_res_cost_df <- rbind(high_res_cost_df, data.frame(
-      from_idx = from_idx,
-      to_idx = to_idx,
-      cost = as.numeric(high_res_cost)
-    ))
-  }
-  
-  print("-----------------------------------")
-}
-gc()
-print(high_res_cost_df)
-
-cost_matrix_low <- gdistance::costDistance(tr_low, p_coords)
-gc()
-max_val <- max(cost_matrix_low[is.finite(cost_matrix_low)], na.rm = TRUE)
-cost_matrix_low[!is.finite(cost_matrix_low)] <- max_val * 10
-#cost_matrix <- readRDS("cost_matrix_Spinus.rds")
-
-
-if(inherits(cost_matrix_low, "dist")) {
-  cost_matrix_mat <- as.matrix(cost_matrix_low)
-} else {
-  cost_matrix_mat <- cost_matrix_low
-}
-
-for(i in 1:nrow(high_res_cost_df)) {
-  from_idx <- high_res_cost_df$from_idx[i]
-  to_idx <- high_res_cost_df$to_idx[i]
-  cost_val <- high_res_cost_df$cost[i]
-  
-  # Update in both directions (symmetric matrix)
-  cost_matrix_mat[from_idx, to_idx] <- cost_val
-  cost_matrix_mat[to_idx, from_idx] <- cost_val
-}
-
-# Convert back to dist object if needed
-if(inherits(cost_matrix_low, "dist")) {
-  cost_matrix_final <- as.dist(cost_matrix_mat)
-} else {
-  cost_matrix_final <- cost_matrix_mat
-}
-
-calculate_mst <- function(cost_matrix) {
-  n <- nrow(cost_matrix)
-  
-  # Initialize arrays
-  parent <- integer(n)  # To store constructed MST
-  key <- rep(Inf, n)    # Key values used to pick minimum weight edge
-  included <- logical(n)  # To represent set of vertices included in MST
-  
-  # Always include the first vertex in MST (can be changed to south_index)
-  key[1] <- 0
-  parent[1] <- -1  # First node is always root of MST
-  
-  # The MST will have n-1 edges
-  for(count in 1:(n-1)) {
-    # Pick the minimum key vertex from the set of vertices not yet included in MST
-    min_key <- Inf
-    min_index <- 0
-    
-    for(v in 1:n) {
-      if(!included[v] && key[v] < min_key) {
-        min_key <- key[v]
-        min_index <- v
-      }
-    }
-    
-    # Add the picked vertex to the MST Set
-    included[min_index] <- TRUE
-    
-    # Update key value and parent index of adjacent vertices
-    for(v in 1:n) {
-      # Update only if v is not in MST, there is an edge, and edge weight is smaller than current key value
-      if(!included[v] && cost_matrix[min_index, v] < key[v]) {
-        parent[v] <- min_index
-        key[v] <- cost_matrix[min_index, v]
-      }
-    }
-  }
-  
-  # Return the parent array which defines the MST
-  return(parent)
-}
-
-clusterExport(cl, "calculate_mst")
-
-mst_parent <- calculate_mst(as.matrix(cost_matrix_final))
-
-
-clusterExport(cl, c("mst_parent", "p_unique"), envir = environment())
-saveRDS(p_unique, "p_temp.rds")
-saveRDS(tr_high, "tr_high_temp.rds")
-
-indices <- 2:length(mst_parent)
-
-clusterExport(cl, c("mst_parent", "indices"))
-all_paths <- parLapply(cl, indices, function(i) {
+process_species_data <- function(raster_path) {
   library(terra)
   library(sf)
-  library(gdistance)
+  library(tools)
   
-  p <- readRDS("p_temp.rds")
-  tr_high <- readRDS("tr_high_temp.rds")
+  species_name <- file_path_sans_ext(basename(raster_path))
   
-  from_idx <- mst_parent[i]
-  to_idx <- i
+  res_AOH_sp <- rast(raster_path)
+  ita <- vect("SCB/ita_30_trans_wgs.shp")
+  con_common <- rast("SCB/con_common_trans_30.tif")
+  wdpa_nodi <- vect("SCB/wdpa_nodi_final_30_tr.shp") %>% terra::project(crs(ita))
+  pa_raster <- rast("SCB/pa_raster.tif")
+  template <- rast("SCB/template.tif")
   
-  if (from_idx < 1) return(NULL)
+  extracted <- terra::extract(res_AOH_sp, wdpa_nodi, touches = TRUE)
+  protected_ids <- unique(extracted[extracted[, 2] == 1, 1])
+  overlapping_areas <- wdpa_nodi[protected_ids, ]
   
-  from_coords <- terra::crds(p[from_idx, ], df = TRUE)
-  to_coords <- terra::crds(p[to_idx, ], df = TRUE)
-  
-  from_cell <- raster::cellFromXY(raster(tr_high), from_coords)
-  to_cell <- raster::cellFromXY(raster(tr_high), to_coords)
-  
-  from_xy <- raster::xyFromCell(raster(tr_high), from_cell)
-  to_xy <- raster::xyFromCell(raster(tr_high), to_cell)
-  
-  # Safe call to shortestPath
-  path <- tryCatch({
-    gdistance::shortestPath(tr_high, from_xy, to_xy, output = "SpatialLines")
-  }, error = function(e) return(NULL))
-  
-  if (is.null(path)) return(NULL)
-  
-  # Check for valid bbox
-  bbox_vals <- sf::st_bbox(st_as_sfc(st_as_sf(path)))
-  if (any(!is.finite(bbox_vals))) return(NULL)
-  
-  return(st_as_sf(path))
-})
-stopCluster(cl)
-gc()
+  if (nrow(overlapping_areas) > 0) {
+    centroidi <- centroids(overlapping_areas)
+    centroidi_vals <- terra::extract(ita, centroidi)
+    valid_centroidi <- !is.na(centroidi_vals[, 2])
+    centroidi <- centroidi[valid_centroidi, ]
+    
+    nodi_sf <- st_as_sf(centroidi)
+    dir.create("SCB/res_rasters/", showWarnings = FALSE, recursive = TRUE)
+    st_write(nodi_sf, paste0("SCB/res_rasters/nodi_", species_name, ".shp"), delete_dsn = TRUE)
+    
+    overlapping_areas$conductance <- 100
+    nodi_raster <- rasterize(overlapping_areas, template, field = "conductance", touches = TRUE)
+    con_AOH_sp <- ifel(is.na(res_AOH_sp), 0, 100)
+    con_pa_species <- ifel(!is.na(nodi_raster), 100, pa_raster)
+    con_sp_final <- con_common + con_pa_species + con_AOH_sp
+    
+    con_sp_final <- crop(con_sp_final, ita)
+    con_sp_final <- mask(con_sp_final, ita)
+    
+    writeRaster(con_sp_final, filename = paste0("SCB/res_rasters/con_", species_name, ".tif"), overwrite = TRUE)
+    
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
+}
 
-all_paths_combined <- do.call(rbind, all_paths)
-if (length(all_paths_combined) > 0) {
-  st_write(all_paths_combined, "paths_Spinus_prova_hybrid_cost.shp", delete_dsn = TRUE)
+# E poi parallelizzi così:
+plan(multisession, workers = 5)
+results <- future_map(raster_files, process_species_data, .progress = TRUE)
+
+
+
+
+
+####################################### mapping sp-specific corridors
+
+process_species_paths <- function(species_name) {
+  message("Processing species: ", species_name)
+  
+  conductance_path <- paste0("SCB/res_rasters/con_", species_name, ".tif")
+  nodes_path <- paste0("SCB/res_rasters/nodi_", species_name, ".shp")
+  
+  if (!file.exists(conductance_path) || !file.exists(nodes_path)) {
+    message("Missing files for species: ", species_name)
+    return(NULL)
+  }
+  
+  # Load and process data
+  conductance <- terra::rast(conductance_path)
+  values(conductance)[values(conductance) == 0] <- 1e-10
+  p <- terra::vect(nodes_path)
+  
+  p <- terra::project(p, "EPSG:3035")
+  conductance <- terra::project(conductance, "EPSG:3035")
+  
+  conductance_lowres <- terra::aggregate(conductance, fact=3, fun="min")
+  conductance_lowres <- raster(conductance_lowres)
+  tr_low <- transition(conductance_lowres, mean, directions = 4)
+  tr_low <- geoCorrection(tr_low)
+  gc()
+  
+  conductance <- raster(conductance)
+  tr_high <- transition(conductance, mean, directions = 4)
+  tr_high <- geoCorrection(tr_high)
+  gc()
+  message("Trasnition calculated for species: ", species_name)
+  
+  p_coords <- as.matrix(terra::crds(p))
+  
+  cost_matrix_low <- costDistance(tr_low, p_coords)
+  max_val <- max(cost_matrix_low[is.finite(cost_matrix_low)], na.rm = TRUE)
+  cost_matrix_low[!is.finite(cost_matrix_low)] <- max_val * 10
+  message("Cost matrix calculated for species: ", species_name)
+  gc()
+  
+  calculate_mst <- function(cost_matrix) {
+    n <- nrow(cost_matrix)
+    parent <- integer(n)
+    key <- rep(Inf, n)
+    included <- logical(n)
+    key[1] <- 0
+    parent[1] <- -1
+    for(count in 1:(n-1)) {
+      min_index <- which.min(ifelse(included, Inf, key))
+      included[min_index] <- TRUE
+      for(v in 1:n) {
+        if(!included[v] && cost_matrix[min_index, v] < key[v]) {
+          parent[v] <- min_index
+          key[v] <- cost_matrix[min_index, v]
+        }
+      }
+    }
+    return(parent)
+  }
+  
+  mst_parent <- calculate_mst(as.matrix(cost_matrix_low))
+  
+  temp_dir <- tempdir()
+  p_file <- file.path(temp_dir, paste0("p_", species_name, ".rds"))
+  tr_high_file <- file.path(temp_dir, paste0("tr_high_", species_name, ".rds"))
+  
+  saveRDS(p, p_file)
+  saveRDS(tr_high, tr_high_file)
+  
+  indices <- 2:length(mst_parent)
+  
+  n_cores <- 3
+  cl <- makeCluster(n_cores)
+  registerDoParallel(cl)
+  
+  message("Processing shortestPath for species: ", species_name)
+  
+  all_paths <- foreach(i = indices, .packages = c("terra", "sf", "gdistance", "raster")) %dopar% {
+    p <- readRDS(p_file)
+    tr_high <- readRDS(tr_high_file)
+    
+    from_idx <- mst_parent[i]
+    to_idx <- i
+    if (from_idx < 1) return(NULL)
+    
+    # Get coordinates
+    from_coords <- terra::crds(p[from_idx, ], df = TRUE)
+    to_coords <- terra::crds(p[to_idx, ], df = TRUE)
+    
+    # Convert to cells
+    from_cell <- raster::cellFromXY(raster(tr_high), from_coords)
+    to_cell <- raster::cellFromXY(raster(tr_high), to_coords)
+    
+    # Get xy coordinates from cells
+    from_xy <- raster::xyFromCell(raster(tr_high), from_cell)
+    to_xy <- raster::xyFromCell(raster(tr_high), to_cell)
+    
+    path <- tryCatch({
+      shortestPath(tr_high, from_xy, to_xy, output = "SpatialLines")
+    }, error = function(e) return(NULL))
+    gc()
+    
+    if (is.null(path)) return(NULL)
+    
+    path_sf <- tryCatch({
+      sf_path <- st_as_sf(path)
+      if (any(!is.finite(st_bbox(st_as_sfc(sf_path))))) {
+        return(NULL)
+      }
+      sf_path
+    }, error = function(e) {
+      return(NULL)
+    })
+    
+    return(path_sf)
+  }
+  
+  stopCluster(cl)
+  gc()
+  unlink(p_file)
+  unlink(tr_high_file)
+  
+  all_paths <- all_paths[!sapply(all_paths, is.null)]
+  if (length(all_paths) > 0) {
+    all_paths_combined <- tryCatch({
+      do.call(rbind, all_paths)
+    }, error = function(e) {
+      message("Error combining paths: ", e$message)
+      return(NULL)
+    })
+    
+    if (!is.null(all_paths_combined) && nrow(all_paths_combined) > 0) {
+      out_dir <- "SCB/paths"
+      if (!dir.exists(out_dir)) {
+        dir.create(out_dir, recursive = TRUE)
+      }
+      
+      out_path <- paste0(out_dir, "/paths_", species_name, ".shp")
+      st_write(all_paths_combined, out_path, delete_layer = TRUE, quiet = TRUE)
+      message("Saved: ", out_path)
+      return(TRUE)
+    } else {
+      message("No valid paths to combine for: ", species_name)
+    }
+  } else {
+    message("No valid paths for: ", species_name)
+  }
+  return(FALSE)
+  gc()
 }
 
 
+shp_files <- list.files("SCB/res_rasters/", pattern = "^nodi_.*\\.shp$", full.names = FALSE)
+shp_files <- shp_files[2:5]  # Limit to first 10 species
+species_names <- gsub("^nodi_(.*)\\.shp$", "\\1", shp_files)
 
-plot(rast(conductance))
-for (path in all_paths_combined) {
-  plot(path, col = "red", lwd = 2, add = TRUE)  
-}
-points(p, col = "blue", pch = 16, cex = 0.8)
+results <- sapply(species_names, process_species_paths)
 
 
 
