@@ -1,0 +1,32 @@
+paola.merelli2@biome-calc:/media/r_projects/paola.merelli2$ find /media -user paola.merelli2 -type d -exec du -sh {} \; 2>/dev/null | sort -hr | head -20
+21G     /media/R_Tmpfs/RtmpydUKZg
+20G     /media/R_Tmpfs/RtmpydUKZg/raster
+16G     /media/R_Tmpfs/Rtmpd6vtxg
+15G     /media/R_Tmpfs/Rtmpd6vtxg/raster
+12G     /media/r_projects/paola.merelli2/assegno_prin/IBAs/SCB
+12G     /media/r_projects/paola.merelli2/assegno_prin/IBAs
+12G     /media/r_projects/paola.merelli2/assegno_prin
+12G     /media/r_projects/paola.merelli2
+11G     /media/r_projects/paola.merelli2/assegno_prin/IBAs/SCB/res_rasters
+3.4G    /media/R_Tmpfs/RtmpRCwKje
+3.3G    /media/R_Tmpfs/RtmpRCwKje/raster
+251M    /media/r_projects/paola.merelli2/R/x86_64-pc-linux-gnu-library/4.3
+251M    /media/r_projects/paola.merelli2/R/x86_64-pc-linux-gnu-library
+251M    /media/r_projects/paola.merelli2/R
+188M    /media/r_projects/paola.merelli2/assegno_prin/IBAs/SCB/AOH
+165M    /media/r_projects/paola.merelli2/R/x86_64-pc-linux-gnu-library/4.3/terra
+161M    /media/r_projects/paola.merelli2/R/x86_64-pc-linux-gnu-library/4.3/terra/libs
+31M     /media/r_projects/paola.merelli2/R/x86_64-pc-linux-gnu-library/4.3/igraph
+26M     /media/r_projects/paola.merelli2/R/x86_64-pc-linux-gnu-library/4.3/igraph/libs
+20M     /media/r_projects/paola.merelli2/R/x86_64-pc-linux-gnu-library/4.3/Rcpp
+paola.merelli2@biome-calc:/media/r_projects/paola.merelli2$ ps aux | grep R
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+paola.m+ 1924081  0.0  0.0  17656  4944 pts/2    R+   14:23   0:00 ps aux
+paola.m+ 1924082  0.0  0.0   5192  2556 pts/2    S+   14:23   0:00 grep --color=auto R
+paola.merelli2@biome-calc:/media/r_projects/paola.merelli2$ rm -rf /media/R_Tmpfs/RtmpydUKZg
+paola.merelli2@biome-calc:/media/r_projects/paola.merelli2$ rm -rf /media/R_Tmpfs/Rtmpd6vtxg
+paola.merelli2@biome-calc:/media/r_projects/paola.merelli2$ rm -rf /media/R_Tmpfs/RtmpRCwKje
+paola.merelli2@biome-calc:/media/r_projects/paola.merelli2$ quota -s
+Disk quotas for user paola.merelli2 (uid 2126026155):
+     Filesystem   space   quota   limit   grace   files   quota   limit   grace
+      /dev/sdb1  11728M  66560M  76800M            2418       0       0
