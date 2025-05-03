@@ -962,4 +962,252 @@ results <- sapply(species_names, process_species_paths)
 
 
 
+####################################################################################
+                                overlap analysis
+####################################################################################
+
+shp_folder <- "SCB/paths8/"
+output_folder <- "SCB/results/"
+dir.create(output_folder)
+
+shapefile_paths <- list.files(path = shp_folder, 
+                              pattern = "\\.shp$", 
+                              full.names = TRUE)
+
+process_species <- function(shapefile_path) {
+  file_name <- basename(shapefile_path)
+  species_name <- gsub("paths_(.+)\\.shp$", "\\1", file_name)
+  
+  paths <- st_read(shapefile_path, quiet = TRUE)
+  paths <- st_make_valid(paths)
+  
+  st_crs(paths) <- 3035
+  paths_projected <- st_transform(paths, 3035)
+  paths_projected <- st_make_valid(paths_projected)
+  paths_projected <- st_cast(paths_projected, "MULTILINESTRING")
+  
+  if (nrow(paths_projected) > 0) {
+    # Create union and buffer
+    paths_union <- st_union(paths_projected)
+    paths_union <- st_make_valid(paths_union)
+    
+    buffer <- st_buffer(paths_union, dist = 500)
+    buffer <- st_make_valid(buffer)
+    
+    return(list(species = species_name, buffer = buffer))
+  }
+  
+  return(NULL)
+}
+
+
+species_buffers <- lapply(shapefile_paths, process_species)
+species_buffers <- species_buffers[!sapply(species_buffers, is.null)]
+species_names <- sapply(species_buffers, function(x) x$species)
+buffer_list <- lapply(species_buffers, function(x) x$buffer)
+
+all_buffers <- do.call(rbind, lapply(seq_along(buffer_list), function(i) {
+  st_sf(species = species_names[i], geometry = buffer_list[[i]])
+}))
+
+bbox <- st_bbox(all_buffers)
+resolution <- c(100, 100)
+
+library(terra)
+template_raster <- rast(xmin=bbox[1], xmax=bbox[3], 
+                        ymin=bbox[2], ymax=bbox[4], 
+                        resolution=resolution, 
+                        crs=st_crs(all_buffers)$wkt)
+
+corridor_rasters <- list()
+for(i in 1:nrow(all_buffers)) {
+  corridor <- all_buffers[i, ]
+  species_name <- species_names[i]
+  corridor_vect <- vect(corridor)
+  corridor_rast <- rasterize(corridor_vect, template_raster, field=1, background=0)
+  
+  crs(corridor_rast) <- "EPSG:3035"
+  
+  corridor_rasters[[i]] <- corridor_rast
+  
+  writeRaster(corridor_rast, file.path(output_folder, paste0(species_name, "_corridor_raster.tif")), overwrite=TRUE)
+
+  gc()
+}
+
+raster_folder <- "SCB/results/"
+raster_files <- list.files(path = raster_folder, 
+                           pattern = "^paths8.*\\.(tif|tiff)$", 
+                           full.names = TRUE)
+
+check_raster_info <- function(raster_file) {
+  # Carica solo i metadati del raster (senza caricare i dati)
+  r_info <- rast(raster_file)
+  
+  return(list(
+    filename = raster_file,
+    name = tools::file_path_sans_ext(basename(raster_file)),
+    crs = crs(r_info),
+    ext = ext(r_info),
+    res = res(r_info)
+  ))
+}
+
+raster_info <- lapply(raster_files, check_raster_info)
+
+create_raster_stack <- function(files = raster_files, info = raster_info, chunk_size = 5) {
+  total_files <- length(files)
+  final_stack <- NULL
+  for (i in seq(1, total_files, by = chunk_size)) {
+      end_idx <- min(i + chunk_size - 1, total_files)
+      chunk_files <- files[i:end_idx]
+      chunk_info <- if (!is.null(info)) info[i:end_idx] else NULL
+      
+      print(paste("Elaborazione chunk", ceiling(i/chunk_size), "di", ceiling(total_files/chunk_size),
+                  "(files", i, "-", end_idx, ")"))
+      
+      # Crea un raster list temporaneo per questo chunk
+      temp_list <- lapply(chunk_files, function(x) {
+        r <- rast(x)
+        return(r)
+      })
+      
+      # Assegna nomi ai raster
+      if (!is.null(chunk_info)) {
+        names_list <- sapply(chunk_info, function(x) x$name)
+        names(temp_list) <- names_list
+      } else {
+        names(temp_list) <- tools::file_path_sans_ext(basename(chunk_files))
+      }
+      
+      # Crea uno stack temporaneo per questo chunk
+      temp_stack <- rast(temp_list)
+      
+      # Aggiungi al raster stack finale
+      if (is.null(final_stack)) {
+        final_stack <- temp_stack
+      } else {
+        final_stack <- c(final_stack, temp_stack)
+      }
+      
+      # Pulizia memoria
+      rm(temp_list, temp_stack)
+      gc(verbose = FALSE)
+    }
+    
+    return(final_stack)
+  
+}
+
+raster_stack <- create_raster_stack(raster_files)
+
+species_richness <- sum(raster_stack)
+gc()
+
+
+writeRaster(species_richness, "SCB/results/richness1-80.tif")
+species_richness <- rast("SCB/results/richness1-80.tif")
+species_richness <- raster(species_richness)
+species_density <- species_richness / nlyr(raster_stack)
+species_density <- rast(species_density)                                               
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+create_community_matrix <- function(raster_stack, grid_sf, threshold = 0.5, 
+                                  chunk_size = 5, presence_absence = TRUE) {
+  total_layers <- nlyr(raster_stack)
+  species_names <- names(raster_stack)
+  
+  print("Creazione della community matrix...")
+  
+  # Inizializza un dataframe vuoto per la community matrix
+  # Ogni riga sarà un pixel della griglia, ogni colonna una specie
+  final_matrix <- data.frame(cell_id = grid_sf$cell_id)
+  
+  # Processa lo stack in chunk per evitare problemi di memoria
+  if (total_layers > chunk_size) {
+    print(paste("Stack con", total_layers, "layer: elaborazione in chunk per ottimizzare la memoria"))
+    
+    # Processa i layer in chunk
+    for (i in seq(1, total_layers, by = chunk_size)) {
+      end_idx <- min(i + chunk_size - 1, total_layers)
+      print(paste("Elaborazione chunk", ceiling(i/chunk_size), "di", ceiling(total_layers/chunk_size),
+                  "(specie", i, "-", end_idx, ")"))
+      
+      # Estrai un subset dello stack
+      chunk_stack <- subset(raster_stack, i:end_idx)
+      chunk_species <- species_names[i:end_idx]
+      
+      # Estrai dati dal raster per ogni poligono nella griglia
+      # Usa la media come metrica per determinare presenza/assenza
+      chunk_results <- exact_extract(chunk_stack, grid_sf, fun = "mean", append_cols = "cell_id")
+      names(chunk_results) <- gsub("^mean\\.", "", names(chunk_results))
+
+      # Converti a presenza/assenza se richiesto
+      if (presence_absence) {
+        # Applica la soglia per convertire i valori in presenza (1) o assenza (0)
+        chunk_results_pa <- chunk_results
+        for (sp in chunk_species) {
+          chunk_results_pa[[sp]] <- ifelse(chunk_results[[sp]] > threshold, 1, 0)
+        }
+        chunk_results <- chunk_results_pa
+      }
+      
+      # Aggiungi i risultati alla matrice finale
+      if (ncol(final_matrix) == 1) {
+        # Prima iterazione, aggiungi tutte le colonne
+        final_matrix <- chunk_results
+      } else {
+        # Unisci con i risultati precedenti
+        final_matrix <- final_matrix %>% 
+          left_join(chunk_results, by = "cell_id")
+      }
+      
+      # Pulizia memoria
+      rm(chunk_stack, chunk_results)
+      if (presence_absence) rm(chunk_results_pa)
+      gc(verbose = FALSE)
+    }
+  } else {
+    # Se abbiamo pochi layer, procediamo in un colpo solo
+    results <- exact_extract(raster_stack, grid_sf, fun = "mean", append_cols = "cell_id")
+    
+    # Converti a presenza/assenza se richiesto
+    if (presence_absence) {
+      for (sp in species_names) {
+        results[[sp]] <- ifelse(results[[sp]] > threshold, 1, 0)
+      }
+    }
+    
+    final_matrix <- results
+  }
+  
+  # Ordina per cell_id
+  final_matrix <- final_matrix %>% arrange(cell_id)
+  
+  # Restituisci la matrice
+  return(final_matrix)
+}
+
+
+
+community_matrix <- create_community_matrix(
+  raster_stack = raster_stack,
+  grid_sf = grid_sf,
+  threshold = 0.5,  # Modifica questa soglia in base alle tue esigenze
+  chunk_size = 5,   # Numero di specie da processare insieme
+  presence_absence = TRUE  # TRUE per una matrice binaria (0/1), FALSE per valori continui
+)
+
 
