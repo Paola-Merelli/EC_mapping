@@ -720,6 +720,9 @@ ita <- vect("SCB/ita_30_trans_wgs.shp")
 con_common <- rast("SCB/con_common_trans_30.tif")
 
 wdpa_nodi <- vect("SCB/wdpa_nodi_final_30_tr.shp") %>% terra::project(crs(ita))
+
+
+########################################################################################################
 wdpa_con <- vect("SCB/wdpa_con_final_30_tr.shp") %>% terra::project(crs(ita))
 
 wdpa_con$conductance <- ifelse(grepl("National Park", wdpa_con$DESIG_E), 80,
@@ -744,6 +747,8 @@ pa_raster <- ifel(pa_raster < 40 & !is.na(iba_raster), 40, pa_raster)
 pa_raster <- pa_raster["conductance"]
 #writeRaster(pa_raster, "SCB/pa_raster.tif")
 #writeRaster(template, "SCB/template.tif", overwrite=TRUE)
+
+#################################################################################################################
 
 raster_files <- list.files("SCB/AOH/", full.names = TRUE)
 
