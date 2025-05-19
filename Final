@@ -107,95 +107,88 @@ library(raster)
 #setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
 
 input_folder <- "EU_final/"  
-output_folder <- "IT_AOH/"
-dir.create(output_folder, recursive = F)
+output_folder_filtered <- "IT_AOH_filtered"
+output_folder_cropped <- "IT_AOH_cropped"
+output_folder_final <- "IT_AOH_final_tr"
+#dir.create(output_folder_filtered, recursive = F)
 
-raster_files <- list.files(input_folder, pattern = "\\.tif$", full.names = TRUE)
-length(raster_file)
-ita_mask <- vect("IT/data_input/italian_territory.shp")
-print(crs(ita_mask))
-test <- rast(raster_files[1])
-crs(ita_mask) == crs(test)
-
-# Lista dei file raster (primi 10)
-rasters_to_keep <- list()
-
-for (raster_file in raster_files) {
-  cat("Processing:", raster_file, "\n")
-  
-  r <- rast(raster_file)
-  
-  # Check CRS compatibility
-  if (!crs(ita_mask) == crs(r)) {
-    cat("Skipping raster: CRS not compatible with ita_mask\n")
-    next
-  }
-  
-  # Check if extents intersect
-  if (!relate(ext(r), ext(ita_mask), "intersects")) {
-    cat("Skipping raster: no intersection with ita_mask\n")
-    next
-  }
-  
-  # Apply the mask
-  r_masked <- mask(r, ita_mask)
-  
-  # Calculate global sum and check for valid values
-  sum_values <- unlist(global(r_masked == 1, fun = "sum", na.rm = TRUE)) # Convert list to numeric
-  
-  cat("Sum values:", sum_values, "\n")
-  
-  if (!is.na(sum_values) && sum_values > 0) {
-    rasters_to_keep <- c(rasters_to_keep, raster_file)
-  }
-  
-  gc()
-}
-
-for (raster_file in rasters_to_keep) {
-  # Definisci il percorso di destinazione per ciascun file
-  destination_file <- file.path(output_folder, basename(raster_file))
-  
-  # Copia il file
-  if (file.copy(raster_file, destination_file, overwrite = TRUE)) {
-    cat("Copied:", raster_file, "to", destination_file, "\n")
-  } else {
-    cat("Failed to copy:", raster_file, "\n")
-  }
-}
-
-
-
-
-# uniformo ext su paese. ex ita
-library(terra)
-library(raster)
-
-#setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
-
-input_folder <- "IT_AOH/"  
-# folder with all AOH files having 1 on italy but still at random ext on EU
-
-ita_mask_path <- "prenodi/prova_transboundary/ita_30_trans_wgs.shp" 
-output_folder <- "IT_AOH_cropped/"  
 num_cores <- 8
+log_file <- "processing_log.txt"
+
+log_message <- function(msg) {
+  cat(msg, "\n")
+  write(msg, file = log_file, append = TRUE)
+}
+
+AOH_filtering_by_extent <- function(raster_files, ita_vect, log_file = NULL) {
+  rasters_to_keep <- list()
+  ita_proj <- terra::project(ita_vect, "EPSG:4326")
+  ita_ext <- ext(ita_proj)
+  ita_crs <- crs(ita_proj)
+  
+  log_message <- function(msg) {
+    cat(msg, "\n")
+    if (!is.null(log_file)) {
+      write(msg, file = log_file, append = TRUE)
+    }
+  }
+  
+  for (i in seq_along(raster_files)) {
+    file <- raster_files[i]
+    log_message(paste0("[", i, "/", length(raster_files), "] Checking extent of: ", basename(file)))
+    
+    # Carica solo metadati
+    r_meta <- rast(file, lyrs = 1)
+    
+    # Verifica CRS
+    if (!same.crs(ita_crs, crs(r_meta))) {
+      log_message("  ✗ Skipped: CRS mismatch")
+      next
+    }
+    
+    # Verifica sovrapposizione geografica
+    if (!relate(ext(r_meta), ita_ext, "intersects")) {
+      log_message("  ✗ Skipped: no intersection with Italy extent")
+      next
+    }
+    
+    log_message("  ✓ Kept: intersects with Italy extent")
+    rasters_to_keep <- c(rasters_to_keep, file)
+  }
+  
+  return(rasters_to_keep)
+}
+
+all_rasters <- list.files(input_folder, pattern = "\\.tif$", full.names = TRUE)
+#all_rasters <- all_rasters[1:5]
+ita_vect <- vect("ita.shp")
+rasters_to_keep <- AOH_filtering_by_extent(all_rasters, ita_vect)
+
+
+input_folder <- "IT_AOH_filtered/"  
+output_folder <- "IT_AOH_cropped/"  
+num_cores <- 4
+raster_files <- list.files(input_folder, pattern = "\\.tif$", full.names = TRUE)
 
 file_chunks <- split(raster_files, cut(seq_along(raster_files), num_cores, labels = FALSE))
 
 process_chunk <- function(chunk_files) {
   library(terra)
-  ita_mask <- terra::vect(ita_mask_path)
-  template_extent <- ext(ita_mask)
-  template <- rast(template_extent, resolution = c(0.0009920726, 0.0009920815))
-  crs(template) <- crs(ita_mask)
-  template[] <- 1
+  ita_vect <- terra::vect("ita.shp")
+  ita_merged <- aggregate(ita_vect)
+  ita_tr <- buffer(ita_merged, width = 100000)
+  template <- rast(ext = ext(ita_tr), resolution = c(100, 100))
+  crs(template) <- "EPSG:3035"
+  ita_mask <- terra::project(ita_tr, "EPSG:4326")
+  template_wgs <- project(template, "EPSG:4326")
+  template_wgs[] <- 1
   
   results <- character()
   
   for (raster_file in chunk_files) {
     result <- tryCatch({
       r <- terra::rast(raster_file)
-      r_resampled <- terra::resample(r, template)
+      r_resampled <- terra::resample(r, template_wgs)
       r_extended <- terra::extend(r_resampled, ita_mask)
       r_cropped <- terra::crop(r_extended, ita_mask)
       r_masked <- terra::mask(r_cropped, ita_mask)
@@ -224,13 +217,12 @@ process_chunk <- function(chunk_files) {
 }
 cl <- makeCluster(num_cores)
 
-clusterExport(cl, c("ita_mask_path", "output_folder", "process_chunk"))
+clusterExport(cl, c("output_folder", "process_chunk"))
 clusterEvalQ(cl, library(terra))
-gc()
+
 all_results <- parLapply(cl, file_chunks, process_chunk)
 stopCluster(cl)
 all_results <- unlist(all_results)
-
 
 
 ############ uniformo BNR
