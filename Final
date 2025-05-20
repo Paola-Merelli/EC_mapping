@@ -283,30 +283,28 @@ stopCluster(cl)
 
 ###################  WDPA ##########################
 
-wdpa_dir <- "prenodi/prova_transboundary/wdpa_all/"
-wdpa_files <- list.files(wdpa_dir, pattern = "\\.shp$", full.names = T)
-wdpa <- lapply(wdpa_files, vect)
-wdpa_all <- do.call(rbind, wdpa)
-wdpa_all <- makeValid(wdpa_all)
-ita_10_trans <- terra::project(ita_10_trans, crs("EPSG:3035"))
-ita_10_trans <- makeValid(ita_10_trans)
+wdpa_dir <- "directory_wdpa_ita_cleaned"
+wdpa_ita <- vect(wdpa_dir)
+wdpa_ita <- makeValid(wdpa_ita)
+crs(wdpa_ita)
 
-wdpa_10_trans <- crop(wdpa_all, ita_10_trans)
-wdpa_10_trans <- mask(wdpa_10_trans, ita_10_trans)
+ita_tr <- terra::project(ita_tr, crs("EPSG:3035"))
+ita_tr <- makeValid(ita_tr)
 
-plot(wdpa_10_trans)
+wdpa_tr <- crop(wdpa_ita, ita_tr)
+wdpa_tr <- mask(wdpa_tr, ita_tr)
 
-names(wdpa_10_trans)
+plot(wdpa_tr)
 
-wdpa_filtered <- wdpa_10_trans[!(wdpa_10_trans$MARINE == "marine" | 
-                                   grepl("Birds Directive", wdpa_10_trans$DESIG_E) | 
-                                   grepl("Habitats Directive", wdpa_10_trans$DESIG_E)) |
-                                   grepl("SVI", wdpa_10_trans$ISO3), ]
+names(wdpa_tr)
+
+wdpa_filtered <- wdpa_tr[!(wdpa_10_trans$MARINE == "marine" | 
+                                   grepl("Birds Directive", wdpa_tr$DESIG_E) | 
+                                   grepl("Habitats Directive", wdpa_tr$DESIG_E))]
 
 wdpa_sf <- st_as_sf(wdpa_filtered)
 wdpa_sf$group_id <- 1:nrow(wdpa_sf)
 dissolve_connected_components <- function(sf_layer) {
-  # Trova solo quelli che si toccano (no sovrapposizione)
   neighbors <- st_touches(sf_layer)
   
   group <- rep(NA_integer_, length(neighbors))
@@ -314,7 +312,6 @@ dissolve_connected_components <- function(sf_layer) {
   
   for (i in seq_along(neighbors)) {
     if (is.na(group[i])) {
-      # BFS per propagare il gruppo
       to_visit <- c(i)
       while (length(to_visit) > 0) {
         idx <- to_visit[1]
@@ -338,19 +335,15 @@ dissolve_connected_components <- function(sf_layer) {
   
   return(dissolved)
 }
+
 wdpa_dissolved <- dissolve_connected_components(wdpa_sf)
 
-st_write(wdpa_dissolved, "prenodi/prova_transboundary/wdpa_nodi_final_10_tr.shp", overwrite= T)
-
-wdpa_con <- wdpa_10_trans[!(wdpa_10_trans$MARINE == "marine" )|
-                           grepl("SVI"], wdpa_10_trans$ISO3
-plot(wdpa_con)
-writeVector(wdpa_con, "prenodi/prova_transboundary/wdpa_con_final_10_tr.shp", overwrite= T)
-
+st_write(wdpa_dissolved, "prenodi/prova_transboundary/wdpa_nodi.shp", overwrite= T)
 
 ############################################ Step 1 : Common conductance #####################################################
 ############################ AOH Richness
-raster_files <- list.files("IT_AOH_final_trans/", pattern = "\\.tif$", full.names = TRUE)
+
+raster_files <- list.files("IT_AOH_final/", pattern = "\\.tif$", full.names = TRUE)
 
 template_file <- rast(raster_files[1])
 template_file[] <- 0
@@ -557,12 +550,23 @@ rli_raster <- rli_raster[["conductance"]]
 ################################ res_dpa
 
 ita <- vect(ita_mask_path)
-wdpa_con <- vect("prenodi/prova_transboundary/wdpa_con_final_30_tr.shp")
+wdpa <- vect("dir_wdpa_ita_cleaned")
+wdpa <- makeValid(wdpa)
+crs(wdpa)
+
+ita_tr <- terra::project(ita_tr, crs("EPSG:3035"))
+ita_tr <- makeValid(ita_tr)
+
+wdpa_tr <- crop(wdpa, ita_tr)
+wdpa_tr <- mask(wdpa_tr, ita_tr)
+
+wdpa_filtered <- wdpa_tr[!(wdpa_10_trans$MARINE == "marine")]
+
 iba <- vect("final/IBAsGlobal_2024_September_03/IBAsGlobal_2024_September_POL_03.shp")
-iba_ita <- crop(iba, ita)
-iba_ita <- mask(iba_ita, ita)
+iba_ita <- crop(iba, ita_tr)
+iba_ita <- mask(iba_ita, ita_tr)
 iba_ita <- terra::project(iba_ita, crs("EPSG:3035"))
-ita_pa <- rbind(wdpa_con, iba_ita)
+ita_pa <- rbind(wdpa_filtered, iba_ita)
 template_file <- terra::project(template_file, crs("EPSG:3035"))
 ita <- terra::project(ita, crs("EPSG:3035"))
 ita_raster <- rasterize(ita, template_file, field = 1)
@@ -603,16 +607,18 @@ plot(res_dpa)
 #con_rli <- rast("con_RLI_Index.tif")
 #ita_mask_path <- "prenodi/prova_transboundary/ita_30_trans_wgs.shp"
 #ita <- vect(ita_mask_path)
+#ita_tr <- buffer(ita, width = 1000000)
 
-con_richness <- crop(con_richness, ita)
-con_richness <- mask(con_richness, ita)
+
+con_richness <- crop(con_richness, ita_tr)
+con_richness <- mask(con_richness, ita_tr)
 
 con_rli[is.na(con_rli)] <- 0
-con_rli <- crop(con_rli, ita)
-con_rli <- mask(con_rli, ita)
+con_rli <- crop(con_rli, ita_tr)
+con_rli <- mask(con_rli, ita_tr)
 
-con_dpa <- crop(con_dpa, ita)
-con_dpa <- mask(con_dpa, ita)
+con_dpa <- crop(con_dpa, ita_tr)
+con_dpa <- mask(con_dpa, ita_tr)
 
 ext(con_dpa) <- ext(con_richness)
 con_dpa <- resample(con_dpa, con_richness)
@@ -628,7 +634,7 @@ plot(con_common)
 library(future)
 library(furrr)
 
-raster_files <- list.files("IT_AOH_final_trans/", pattern = "\\.tif$", full.names = TRUE)
+raster_files <- list.files("IT_AOH_final/", pattern = "\\.tif$", full.names = TRUE)
 protected_areas <- vect("SCB/wdpa_nodi_final_30_tr.shp")
 test <- rast(raster_files[1])
 
