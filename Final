@@ -1348,6 +1348,8 @@ community_matrix[is.na(community_matrix)] <- 0
 community_matrix_clean <- community_matrix[rowSums(community_matrix[, -1], na.rm = TRUE) > 0, ]
 comm_mat <- community_matrix_clean[, !(names(community_matrix_clean) %in% "id")]
 
+
+######## forse sorensen meglio per qmode
 d_jacc <- vegdist(comm_mat, method = "jaccard", binary = TRUE)
 gc()
 saveRDS(d_jacc, file = "distance_matrix_jaccard.rds")
