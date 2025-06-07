@@ -1,0 +1,183 @@
+library(tidyverse)
+library(terra)
+library(future)
+library(future.apply)
+library(dplyr)
+
+
+############################################################# AOH prep #################################################################
+########################################################################################################################################
+
+## su locale
+####### filtrare i file AOH con extent europea e cropparli -> EU_final da cui partire per poi filtrare i vari paesi
+
+eu <- vect("path/to/file.shp") |> 
+  project("EPSG:4326")
+
+ordini <- list.dirs("path/to/all/orders/folder/", recursive = T)
+raster_files <- unlist(lapply(ordini, list.files, pattern = "\\.tif$", full.names = TRUE))
+
+output_folder <- "path/to/folder" #AOH masked on EU
+# dir.create(output_folder, recursive = T)
+log_file <- "path/to/log.txt"
+# file.create(log_file)
+
+process_file <- function(raster_file, eu, output_folder, log_file) {
+  tryCatch({
+    r <- rast(raster_file)
+
+    if (relate(ext(r), ext(eu), "intersects")) {
+      rc <- crop(r, eu, snap = "out", mask = T)
+      writeRaster(rc, file.path(output_folder, basename(raster_file)), overwrite = T)
+      rm(rc)
+      gc()
+    }
+  }, error = function(e){
+   msg <- paste("- Error:", raster_file, " - ", e$message)
+   message(msg)
+   write(msg, file = log_file, append = TRUE)
+  })
+}
+
+plan(multisession)
+future_lapply(
+  raster_files,
+  FUN = process_file,
+  eu = eu,
+  output_folder = output_folder,
+  log_file = log_file
+)
+
+
+
+##### su server
+## dalla cartella con AOH EU estraggo quelle su un certo paese e creo cartella con AOH cropped e merged per quel paese. es ita
+
+ita_path <- "path/to/file.shp"
+input_folder <- "path/to/all/EU_files/folder/"
+output_folder <- "path/to/folder" #AOH masked on ita + tr
+# dir.create(output_folder, recursive = T)
+temp_folder <- tempfile()
+dir.create(temp_folder, recursive = T, showWarnings = FALSE)
+log_file <- "path/to/log.txt"
+# file.create(log_file)
+
+process_AOH <- function(input_folder, ita_path, output_folder, temp_folder, log_file ="log.txt") {
+  library(terra)
+  library(future)
+  library(future.apply)
+  
+  file.create(log_file)
+  
+  ita_mask <- terra::vect(ita_path) |>
+    makeValid() |>
+    aggregate() |>
+    buffer(width = 100000)
+  
+  template <- rast(ext = ext(ita_mask), resolution = c(100, 100))
+  crs(template) <- "EPSG:3035"
+  
+  ita_mask <- terra::project(ita_mask, "EPSG:4326")
+  template_wgs <- terra::project(template, "EPSG:4326")
+  template_wgs[] <- 1
+  
+  raster_files <- list.files(input_folder, pattern = "\\.tif$", recursive = T)
+  
+  process_i <- function(raster_file) {
+    
+    tryCatch({
+      r <- rast(raster_file)
+      if (relate(ext(r), ext(ita_mask), "intersects")) {
+        rc <- r |>
+          terra::resample(template_wgs) |>
+          terra::extend(ita_mask) |>
+          terra::crop(ita_mask, snap = "out", mask = T) |>
+          terra::classify(rbind(c(-Inf, 0, NA), c(1, 1, 1), c(1.0001, Inf, NA)))
+        coltab(rc) <- NULL
+        writeRaster(rc, file.path(temp_folder, basename(raster_file)), overwrite = T)
+        rm(r, rc)
+        gc()
+      }
+    }, error = function(e){
+      msg <- paste("Error", raster_file, " - ", e$message)
+      message(msg)
+      write(msg, file = log_file, append = T)
+    })
+  }
+  
+  plan(multisession)
+  future_lapply(raster_files, process_i)
+  
+  cf <- list.files(temp_folder, pattern = "\\.tif$", full.names = T)
+  sp <- unique(gsub("_[NRB]\\.tif$|\\.tif$", "", basename(cf)))
+    
+    
+  for (s in sp) {
+    sr <- cf[grepl(paste0("^", s, "(_[NRB])?\\.tif$"), basename(cf))]
+      
+    if(length(sr) > 1) {
+      rs <- lapply(sr, rast)
+      ms <- Reduce(function(x, y) sum(x, y, na.rm = TRUE), rs)
+      ms[ms > 1] <- 1
+      } else if (length(sr) == 1) {
+        ms <- rast(sr)
+      } else {
+        message("no raster for ", s)
+        next
+      }
+                     
+      terra::writeRaster(ms, file.path(output_folder, paste0(s, ".tif")), overwrite = T)    
+      rm(ms)
+      gc()
+    }
+}
+
+
+process_AOH(input_folder,
+              ita_path,
+              output_folder,
+              temp_folder,
+              log_file)
+unlink(temp_folder, recursive = TRUE)
+
+
+
+######################################################## WDPA nodi #################################################################
+####################################################################################################################################
+
+ita <- st_read("data/ita.shp") |>
+  st_make_valid() |>
+  st_union() |>
+  st_buffer(100000)
+
+wdpa_ita <- st_read("data/ITA_wdpa_cleaned.shp") |>
+  st_make_valid() 
+
+wdpa_ita <- wdpa_ita |>
+  filter(
+    !(MARINE == "marine" | str_detect(DESIG_E, "Directive"))
+  )
+
+dissolve_adjacent_pa <- function(sf_layer) {
+  neighbors <- st_intersects(sf_layer)
+  edges <- do.call(rbind, lapply(seq_along(neighbors), function(i) {
+    if (length(neighbors[[i]]) > 0) {
+      cbind(from = i, to = neighbors[[i]])
+    }
+  }))
+  g <- graph_from_edgelist(edges, directed = FALSE)
+  components <- components(g)$membership
+  sf_layer$group_id <- components
+  
+  dissolved <- sf_layer |>
+    group_by(group_id) |>
+    summarise(geometry = st_union(geometry), .groups = "drop")
+  
+  return(dissolved)
+}
+
+wdpa_diss <- dissolve_adjacent_pa(wdpa_ita)
+
+#write_sf(wdpa_diss, "wdpa_nodi.shp")
+#a <- st_centroid(wdpa_diss)
+#write_sf(a, "centroids.shp")
