@@ -140,20 +140,22 @@ process_AOH(input_folder,
               log_file)
 unlink(temp_folder, recursive = TRUE)
 
-
+#### aggiungere qui parte in cui si contano nodi per sp e si fa un df da tenere cosi gia si escludono sp con 0 nodi e si riduce rasterstack per analisi successive
 
 ######################################################## WDPA nodi #################################################################
 ####################################################################################################################################
 
-ita <- st_read("data/ita.shp") |>
-  st_make_valid() |>
-  st_union() |>
-  st_buffer(100000)
+ita <- vect("data/ita.shp") |>
+  makeValid() |>
+  aggregate() |>
+  buffer(100000)
 
-wdpa_ita <- st_read("data/ITA_wdpa_cleaned.shp") |>
-  st_make_valid() 
+wdpa_ita <- vect("data/ITA_wdpa_cleaned.shp") |>
+  makeValid() |>
+  crop(ita)
 
-wdpa_ita <- wdpa_ita |>
+
+wdpa_ita <- st_as_sf(wdpa_ita) |>
   filter(
     !(MARINE == "marine" | str_detect(DESIG_E, "Directive"))
   )
@@ -181,3 +183,49 @@ wdpa_diss <- dissolve_adjacent_pa(wdpa_ita)
 #write_sf(wdpa_diss, "wdpa_nodi.shp")
 #a <- st_centroid(wdpa_diss)
 #write_sf(a, "centroids.shp")
+
+
+##################################################################################################################################
+################################################### resistance ###################################################################
+
+raster_files <- list.files("IT_AOH_final/", pattern = "\\.tif$", full.names = TRUE)
+file_chunks <- split(raster_files, ceiling(seq_along(raster_files) / ceiling(length(raster_files) / 4)))
+temp_dir <- "temp_rasters"
+#dir.create(temp_dir, showWarnings = FALSE)
+
+cl <- makeCluster(4)
+registerDoParallel(cl)
+partial_results <- foreach(i = seq_along(file_chunks), .packages = "terra") %dopar% {
+  chunk <- file_chunks[[i]]
+  pre_sum <- rast(chunk[1])
+  pre_sum[is.na(pre_sum)] <- 0
+  
+  if (length(chunk) > 1) {
+    for (file in chunk[-1]) {
+      r <- rast(file)
+      r[is.na(r)] <- 0
+      pre_sum <- pre_sum + r
+      rm(r)
+      gc()
+    }
+  }
+  
+  temp_file <- file.path(temp_dir, paste0("partial_", i, ".tif"))
+  writeRaster(pre_sum, temp_file, overwrite = TRUE)
+  rm(pre_sum)
+  gc()
+  return(temp_file)
+}
+stopCluster(cl)
+
+richness <- rast(partial_results[[1]])
+for (temp_file in partial_results[-1]) {
+  r <- rast(temp_file)
+  richness <- richness + r
+  rm(r)
+  file.remove(temp_file)
+  gc()
+}
+unlink(temp_dir, recursive = TRUE)
+
+
