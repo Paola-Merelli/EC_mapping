@@ -187,6 +187,24 @@ wdpa_diss <- dissolve_adjacent_pa(wdpa_ita)
 
 ##################################################################################################################################
 ################################################### resistance ###################################################################
+inv_rescale <- function (r, max_scale) {
+  r_scale <- global(r, fun = range, na.rm = T)
+  r_min <- r_scale[1, 1]
+  r_max <- r_scale[1, 2]
+  r_rescaled <- ((r_max - r) / (r_max - r_min) * max_scale)
+  return(r_rescaled)
+}
+
+dir_rescale <- function(r, max_scale) {
+  r_scale <- global(r, function = range, na.rm = T)
+  r_min <- r_scale[1, 1]
+  r_max <- r_scale[1, 2]
+  r_rescaled <- ((r - r_min) / (r_max - r_min) * max_scale)
+  return(r_rescaled)
+}
+
+
+############################ AOH richness
 
 raster_files <- list.files("IT_AOH_final/", pattern = "\\.tif$", full.names = TRUE)
 file_chunks <- split(raster_files, ceiling(seq_along(raster_files) / ceiling(length(raster_files) / 4)))
@@ -228,4 +246,9 @@ for (temp_file in partial_results[-1]) {
 }
 unlink(temp_dir, recursive = TRUE)
 
+richness$resistance <- inv_rescale(richness, max_scale = 100)
+plot(ruchness$resistance)
+richness <- richness[["resistance"]]
+
+#writeRaster(richness, "data/richness_res.tif", overwrite = T)
 
