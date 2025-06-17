@@ -247,8 +247,85 @@ for (temp_file in partial_results[-1]) {
 unlink(temp_dir, recursive = TRUE)
 
 richness$resistance <- inv_rescale(richness, max_scale = 100)
-plot(ruchness$resistance)
+plot(richness$resistance)
 richness <- richness[["resistance"]]
 
 #writeRaster(richness, "data/richness_res.tif", overwrite = T)
+
+########################################## rli index
+
+#### magari trovare un modo per scaricare direttamente da iucn lista sp uccelli così è sempre updated ???
+
+
+species_data <- read.csv("data/species_iucn.csv") |>
+  mutate(
+    Scientific.name = gsub(" ", "_", Scientific.name),
+    weight = c("LC" = 0, "NT" = 1, "VU" = 2, "EN" = 3, "CR" = 4, "EX" = 5)[RL.Category]
+  )
+
+raster_files <- list.files("IT_AOH_final/", pattern = "\\.tif$", full.names = TRUE)
+file_chunks <- split(raster_files, ceiling(seq_along(raster_files) / ceiling(length(raster_files) / 4)))
+temp_dir <- "temp_rasters"
+#dir.create(temp_dir, showWarnings = FALSE)
+r <- rast("temp_rasters/weight_1.tif")
+plot(r)
+scl <- makeCluster(4)
+registerDoParallel(cl)
+partial_results <- foreach(i = seq_along(file_chunks), 
+                           .packages = c("terra", "tools"),
+                           .export = c("species_data", "temp_dir")) %dopar% {
+                             chunk <- file_chunks[[i]]
+                             if (length(chunk) > 1) { 
+                               pre_wgt_sum <- rast(chunk[1])
+                               values(pre_wgt_sum) <- 0
+                             
+                             for (file in chunk) {
+                               species_name <- file_path_sans_ext(basename(file))
+                               weight_idx <- which(species_data$Scientific.name == species_name)
+                              
+                               if (length(weight_idx) == 1) {
+                                 weight <- species_data$weight[weight_idx]
+                                 aoh_raster <- rast(file)
+                                 aoh_raster[is.na(aoh_raster)] <- 0
+                                 
+                                 pre_wgt_sum <- pre_wgt_sum + (aoh_raster * weight)
+                                 
+                                 rm(aoh_raster)
+                                 gc()
+                               }
+                             } 
+                             }
+                             
+                             # Salva i risultati parziali
+                             weight_file <- file.path(temp_dir, paste0("weight_", i, ".tif"))
+                             writeRaster(pre_wgt_sum, weight_file, overwrite = TRUE)
+                             rm(pre_wgt_sum)
+                             gc()
+                             return(weight_file)
+                           }
+
+stopCluster(cl)
+
+weight_files <- list.files("temp_rasters/", pattern = "\\.tif$", full.names = T)
+weight_sum <- rast(weight_files[1])
+
+for (file in weight_files[-1]) {
+  r <- rast(file)
+  weight_final <- weight_sum + r
+  rm(r)
+  gc()
+}
+unlink(temp_dir, recursive = TRUE)
+
+richness <- rast("data/richness_res.tif")
+max_weight_raster <- richness * 5  
+rli_res <- 1 - (weight_final / max_weight_raster)
+rli_res[is.na(rli_res)] <- NA
+
+
+rli_res$resistance <- dir_rescale(rli_res, max_scale = 100)
+rli_res <- rli_res[["resistance"]]
+plot(richness)
+
+#writeRaster(rli_res, "data/RLI_Index_res.tif", overwrite = TRUE)
 
