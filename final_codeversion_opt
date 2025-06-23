@@ -196,7 +196,7 @@ inv_rescale <- function (r, max_scale) {
 }
 
 dir_rescale <- function(r, max_scale) {
-  r_scale <- global(r, function = range, na.rm = T)
+  r_scale <- global(r, fun = range, na.rm = T)
   r_min <- r_scale[1, 1]
   r_max <- r_scale[1, 2]
   r_rescaled <- ((r - r_min) / (r_max - r_min) * max_scale)
@@ -329,3 +329,43 @@ plot(richness)
 
 #writeRaster(rli_res, "data/RLI_Index_res.tif", overwrite = TRUE)
 
+
+####################################### dpa
+
+ita_mask <- vect("data/ita.shp") |>
+  makeValid() |>
+  aggregate() |>
+  buffer(width = 100000)
+
+wdpa_ita <- vect("data/ITA_wdpa_cleaned.shp") |>
+  makeValid() |>
+  crop(ita_mask) |>
+  (\(x) {
+    x[x$MARINE != "marine", ]
+  })() |>
+  aggregate()
+
+iba <- vect("data/Lipu_IBAs") |>
+  makeValid() |>
+  terra::project(crs("EPSG:3035")) |>
+  crop(ita_mask) |>
+  terra::union()
+
+ita_pas <- rbind(wdpa_ita, iba)
+plot(ita_pas)
+
+template <- list.files("IT_AOH_final/", pattern = "\\.tif$", full.names = TRUE) |>
+  (\(x) rast(x[1]))() |>
+  terra::project(crs("EPSG:3035"))
+
+ita_pas_raster <- rasterize(ita_pas, template, field = 1)
+plot(ita_pas_raster)
+
+res_dpa <- ita_pas_raster |>
+  terra::distance() |>
+  mask(ita_mask) |>
+  project(crs("EPSG:4326")) |>
+  (\(x) x / 100)() |>
+  dir_rescale(max_scale = 100)
+
+#writeRaster(res_dpa, "data/dpa_res.tif")
