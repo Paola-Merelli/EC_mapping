@@ -1,0 +1,91 @@
+calculate_res_common <- function(
+  aoh_dir = "IT_AOH_final/",
+  species_file = "data/species_iucn.csv",
+  shp_wdpa = "data/ITA_wdpa_cleaned.shp",
+  shp_iba = "data/Lipu_IBAs",
+  shp_mask = "data/ita.shp",
+  max_scale = 100,
+  temp_dir = "temp_rasters",
+  n_cores = 4
+) {
+  library(terra)
+  library(dplyr)
+  library(foreach)
+  library(doParallel)
+  library(tools)
+  
+  inv_rescale <- function(r, max_scale) {
+    r_scale <- global(r, fun = range, na.rm = TRUE)
+    r_min <- r_scale[1, 1]
+    r_max <- r_scale[1, 2]
+    ((r_max - r) / (r_max - r_min) * max_scale)
+  }
+
+  dir_rescale <- function(r, max_scale) {
+    r_scale <- global(r, fun = range, na.rm = TRUE)
+    r_min <- r_scale[1, 1]
+    r_max <- r_scale[1, 2]
+    ((r - r_min) / (r_max - r_min) * max_scale)
+  }
+
+  species_data <- read.csv(species_file) %>%
+    mutate(
+      Scientific.name = gsub(" ", "_", Scientific.name),
+      weight = c("LC" = 0, "NT" = 1, "VU" = 2, "EN" = 3, "CR" = 4, "EX" = 5)[RL.Category]
+    )
+
+  raster_files <- list.files(aoh_dir, pattern = "\\.tif$", full.names = TRUE)
+  file_chunks <- split(raster_files, ceiling(seq_along(raster_files) / ceiling(length(raster_files) / n_cores)))
+  
+  cl <- makeCluster(n_cores)
+  registerDoParallel(cl)
+
+  results <- foreach(i = seq_along(file_chunks), .packages = c("terra", "tools", "dplyr")) %dopar% {
+    chunk <- file_chunks[[i]]
+    
+    richness_chunk <- rast(chunk[1])
+    values(richness_chunk)[is.na(values(richness_chunk))] <- 0
+    weight_chunk <- richness_chunk * 0
+    
+    for (file in chunk) {
+      species_name <- file_path_sans_ext(basename(file))
+      idx <- which(species_data$Scientific.name == species_name)
+      weight <- if (length(idx) == 1) species_data$weight[idx] else 0
+      
+      r <- rast(file)
+      r[is.na(r)] <- 0
+      richness_chunk <- richness_chunk + r
+      weight_chunk <- weight_chunk + (r * weight)
+    }
+
+    list(richness = richness_chunk, weight = weight_chunk)
+  }
+  stopCluster(cl)
+
+  richness <- Reduce(`+`, lapply(results, `[[`, "richness"))
+  richness_rescaled <- inv_rescale(richness, max_scale)
+
+  weight_raster <- Reduce(`+`, lapply(results, `[[`, "weight"))
+  rli_res <- 1 - (weight_raster / (richness * 5))
+  rli_res[is.na(rli_res)] <- 0
+  rli_rescaled <- dir_rescale(rli_res, max_scale)
+
+  ita_mask <- vect(shp_mask) |> makeValid() |> aggregate() |> buffer(width = 100000)
+  wdpa <- vect(shp_wdpa) |> makeValid() |> crop(ita_mask) |> (\(x) x[x$MARINE != "marine", ])() |> aggregate()
+  iba <- vect(shp_iba) |> makeValid() |> terra::project(crs("EPSG:3035")) |> crop(ita_mask) |> terra::union()
+  ita_pas <- rbind(wdpa, iba)
+
+  template <- rast(raster_files[1]) |> terra::project(crs("EPSG:3035"))
+  ita_raster <- rasterize(ita_pas, template, field = 1)
+
+  res_dpa <- ita_raster |>
+    terra::distance() |>
+    mask(ita_mask) |>
+    project(crs("EPSG:4326")) |>
+    (\(x) x / 100)() |>
+    dir_rescale(max_scale) |>
+    resample(richness_rescaled, method = "bilinear")
+
+  res_common <- richness_rescaled + rli_rescaled + res_dpa
+  return(list(res_common = res_common, richness = richness_rescaled, rli = rli_rescaled, dpa = res_dpa))
+}
