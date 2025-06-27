@@ -6,13 +6,15 @@ calculate_res_common <- function(
   shp_mask = "data/ita.shp",
   max_scale = 100,
   temp_dir = "temp_rasters",
-  n_cores = 4
-) {
+  n_cores = 4,
+  cleanup = T) {
   library(terra)
   library(dplyr)
   library(foreach)
   library(doParallel)
   library(tools)
+
+  dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
   
   inv_rescale <- function(r, max_scale) {
     r_scale <- global(r, fun = range, na.rm = TRUE)
@@ -40,11 +42,10 @@ calculate_res_common <- function(
   cl <- makeCluster(n_cores)
   registerDoParallel(cl)
 
-  results <- foreach(i = seq_along(file_chunks), .packages = c("terra", "tools", "dplyr")) %dopar% {
+  partial_results <- foreach(i = seq_along(file_chunks), .packages = c("terra", "tools", "dplyr")) %dopar% {
     chunk <- file_chunks[[i]]
-    
-    richness_chunk <- rast(chunk[1])
-    values(richness_chunk)[is.na(values(richness_chunk))] <- 0
+    richness_chunk <- rast(chunk[1]) 
+    values(richness_chunk)[is.na(richness_chunk)] <- 0
     weight_chunk <- richness_chunk * 0
     
     for (file in chunk) {
@@ -56,16 +57,27 @@ calculate_res_common <- function(
       r[is.na(r)] <- 0
       richness_chunk <- richness_chunk + r
       weight_chunk <- weight_chunk + (r * weight)
+      rm(r)
+      gc()
     }
 
-    list(richness = richness_chunk, weight = weight_chunk)
+    richness_file <- file.path(temp_dir, paste0("richness_", i, ".tif"))
+    weight_file <- file.path(temp_dir, paste0("weight_", i, ".tif"))
+    writeRaster(richness_chunk, richness_file, overwrite = T)
+    writeRaster(weight_chink, weight_file, overwrite = T)
+
+    list(richness = richness_file, weight = weight_chink)
   }
   stopCluster(cl)
 
-  richness <- Reduce(`+`, lapply(results, `[[`, "richness"))
+  richness <- rast(partial_results[[1]]$richness
+  weight <- weight + rast(res$weight)
+  for (res in partial_results[-1])
+    richness <- richness + rast(res$richness)
+    weight <- weight + rast(res$weight)
+  }
+  
   richness_rescaled <- inv_rescale(richness, max_scale)
-
-  weight_raster <- Reduce(`+`, lapply(results, `[[`, "weight"))
   rli_res <- 1 - (weight_raster / (richness * 5))
   rli_res[is.na(rli_res)] <- 0
   rli_rescaled <- dir_rescale(rli_res, max_scale)
@@ -87,5 +99,18 @@ calculate_res_common <- function(
     resample(richness_rescaled, method = "bilinear")
 
   res_common <- richness_rescaled + rli_rescaled + res_dpa
+  if (cleanup) unlink(temp_dir, recursive = T)
+
   return(list(res_common = res_common, richness = richness_rescaled, rli = rli_rescaled, dpa = res_dpa))
 }
+
+res_results <- calculate_res_common(
+  aoh_dir = "IT_AOH_final/",
+  species_file = "data/species_iucn.csv",
+  shp_wdpa = "data/ITA_wdpa_cleaned.shp",
+  shp_iba = "data/Lipu_IBAs",
+  shp_mask = "data/ita.shp",
+  max_scale = 100,
+  temp_dir = "temp_rasters",
+  n_cores = 4,
+  cleanup = T)
