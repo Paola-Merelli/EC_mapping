@@ -1,0 +1,86 @@
+process_AOH <- function(
+  input_folder,
+  ita_path,
+  output_folder,
+  log_file = "log.txt",
+  resolution = 100,
+  cleanup_temp = TRUE,
+  verbose = TRUE
+) {
+  library(terra)
+  library(future)
+  library(future.apply)
+  
+  # Prepara le cartelle
+  temp_folder <- tempfile()
+  dir.create(temp_folder, recursive = TRUE, showWarnings = FALSE)
+  dir.create(output_folder, recursive = TRUE, showWarnings = FALSE)
+  file.create(log_file)
+  
+  # Maschera Italia
+  ita_mask <- vect(ita_path) |> makeValid() |> aggregate() |> buffer(width = 100000)
+  template <- rast(ext = ext(ita_mask), resolution = c(resolution, resolution))
+  crs(template) <- "EPSG:3035"
+  template_wgs <- terra::project(template, "EPSG:4326")
+  template_wgs[] <- 1
+  ita_mask <- terra::project(ita_mask, "EPSG:4326")
+  
+  # File raster da processare
+  raster_files <- list.files(input_folder, pattern = "\\.tif$", recursive = TRUE, full.names = TRUE)
+
+  if (verbose) message("Inizio elaborazione raster AOH...")
+
+  # Funzione interna per mascherare
+  process_i <- function(raster_file) {
+    tryCatch({
+      r <- rast(raster_file)
+      if (relate(ext(r), ext(ita_mask), "intersects")) {
+        rc <- r |>
+          terra::resample(template_wgs) |>
+          terra::extend(ita_mask) |>
+          terra::crop(ita_mask, snap = "out", mask = TRUE) |>
+          terra::classify(rbind(c(-Inf, 0, NA), c(1, 1, 1), c(1.0001, Inf, NA)))
+        coltab(rc) <- NULL
+        writeRaster(rc, file.path(temp_folder, basename(raster_file)), overwrite = TRUE)
+        rm(r, rc); gc()
+      }
+    }, error = function(e) {
+      msg <- paste("Error", raster_file, "-", e$message)
+      write(msg, file = log_file, append = TRUE)
+      if (verbose) message(msg)
+    })
+  }
+
+  plan(multisession)
+  future_lapply(raster_files, process_i)
+
+  # Fusione per specie
+  if (verbose) message("Unione raster per specie...")
+  cf <- list.files(temp_folder, pattern = "\\.tif$", full.names = TRUE)
+  sp <- unique(gsub("_[NRB]\\.tif$|\\.tif$", "", basename(cf)))
+
+  for (s in sp) {
+    sr <- cf[grepl(paste0("^", s, "(_[NRB])?\\.tif$"), basename(cf))]
+    
+    if (length(sr) > 1) {
+      rs <- lapply(sr, rast)
+      ms <- Reduce(function(x, y) sum(x, y, na.rm = TRUE), rs)
+      ms[ms > 1] <- 1
+    } else if (length(sr) == 1) {
+      ms <- rast(sr)
+    } else {
+      msg <- paste("Nessun raster trovato per", s)
+      write(msg, file = log_file, append = TRUE)
+      if (verbose) message(msg)
+      next
+    }
+
+    writeRaster(ms, file.path(output_folder, paste0(s, ".tif")), overwrite = TRUE)
+    rm(ms); gc()
+  }
+
+  # Cleanup
+  if (cleanup_temp) unlink(temp_folder, recursive = TRUE)
+
+  if (verbose) message("✅ Workflow completato!")
+}
