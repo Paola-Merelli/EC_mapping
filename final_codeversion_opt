@@ -185,8 +185,9 @@ wdpa_diss <- dissolve_adjacent_pa(wdpa_ita)
 
 #### aggiungere qui parte in cui si contano nodi per sp e si fa un df da tenere cosi gia si escludono sp con 0 nodi e si riduce rasterstack per analisi successive
 ############## nodes_df
+
 raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)
-protected_areas <- vect("IT/data_input/wdpa_ita.shp")
+protected_areas <- vect("data/wdpa_nodi.shp")
 test <- rast(raster_files[1])
 
 protected_areas <- project(protected_areas, crs(test))
