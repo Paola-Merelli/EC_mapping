@@ -140,7 +140,6 @@ process_AOH(input_folder,
               log_file)
 unlink(temp_folder, recursive = TRUE)
 
-#### aggiungere qui parte in cui si contano nodi per sp e si fa un df da tenere cosi gia si escludono sp con 0 nodi e si riduce rasterstack per analisi successive
 
 ######################################################## WDPA nodi #################################################################
 ####################################################################################################################################
@@ -183,6 +182,48 @@ wdpa_diss <- dissolve_adjacent_pa(wdpa_ita)
 #write_sf(wdpa_diss, "wdpa_nodi.shp")
 #a <- st_centroid(wdpa_diss)
 #write_sf(a, "centroids.shp")
+
+#### aggiungere qui parte in cui si contano nodi per sp e si fa un df da tenere cosi gia si escludono sp con 0 nodi e si riduce rasterstack per analisi successive
+############## nodes_df
+raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)
+protected_areas <- vect("IT/data_input/wdpa_ita.shp")
+test <- rast(raster_files[1])
+
+protected_areas <- project(protected_areas, crs(test))
+crs(protected_areas) == crs(test)
+plot(protected_areas)
+plot(test, add = T)
+
+
+# Inizializza il dataframe
+percent_coverage_df <- data.frame(
+  species = basename(raster_files),  
+  percent_coverage = NA,
+  total_protected_areas = NA)
+
+# Itera su ogni raster
+for (i in seq_along(raster_files)) {
+  cat("Processing:", raster_files[i], "\n")
+  
+  # Carica il raster
+  r <- rast(raster_files[i])
+  
+  # Estrai i valori dalle aree protette
+  extracted <- extract(r, protected_areas, touches = TRUE)
+  
+  # Conta il numero totale di aree protette con habitat
+  total_pa_with_habitat <- sum(
+    tapply(extracted[, 2], extracted[, 1], function(values) any(values == 1, na.rm = TRUE))
+  )
+  
+  percent_coverage_df$total_protected_areas[i] <- total_pa_with_habitat
+  
+  gc()
+  
+}
+
+nodes_df$total_PAs <- percent_coverage_df$total_protected_areas
+write.csv(nodes_df, "nodes_df.csv")
 
 
 ##################################################################################################################################
