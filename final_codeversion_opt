@@ -179,52 +179,57 @@ dissolve_adjacent_pa <- function(sf_layer) {
 
 wdpa_diss <- dissolve_adjacent_pa(wdpa_ita)
 
-#write_sf(wdpa_diss, "wdpa_nodi.shp")
-#a <- st_centroid(wdpa_diss)
-#write_sf(a, "centroids.shp")
+centroid_extr <- function(sf) {
+  sf %>% 
+    mutate(
+      centroid = st_centroid(geometry), 
+      centroid_valid = st_within(centroid, geometry, sparse = F)[,1]
+    ) %>%
+    rowwise() %>%
+    mutate(centroid_final = if (centroid_valid == T) centroid
+           else st_point_on_surface(geometry)) %>%
+    ungroup() %>%
+    mutate(centroid_final = st_sfc(centroid_final, crs = st_crs(sf))) %>%
+    {st_geometry(.) <- "centroid_final"; . }
+}
+centroids <- centroid_extr(wdpa_diss)
 
-#### aggiungere qui parte in cui si contano nodi per sp e si fa un df da tenere cosi gia si escludono sp con 0 nodi e si riduce rasterstack per analisi successive
-############## nodes_df
+st_write(wdpa_diss, "data/wdpa_nodi.gpkg")
+st_write(centroids, "data/centroids_nodi.gpkg")
 
+############################## sp_nodes_df
 raster_files <- list.files("IT_AOH_final", pattern = "\\.tif$", full.names = TRUE)
-protected_areas <- vect("data/wdpa_nodi.shp")
 test <- rast(raster_files[1])
+protected_areas <- vect("data/wdpa_nodi.gpkg") |>
+  terra::project(crs(test))
 
-protected_areas <- project(protected_areas, crs(test))
-crs(protected_areas) == crs(test)
-plot(protected_areas)
-plot(test, add = T)
-
-
-# Inizializza il dataframe
 percent_coverage_df <- data.frame(
   species = basename(raster_files),  
-  percent_coverage = NA,
-  total_protected_areas = NA)
+  nnodes = NA)
 
-# Itera su ogni raster
+pb <- progress_bar$new(
+  format = "[:bar] :current/:total :species",
+  total = length(raster_files), clear = FALSE, width = 60
+)
+
 for (i in seq_along(raster_files)) {
-  cat("Processing:", raster_files[i], "\n")
-  
-  # Carica il raster
   r <- rast(raster_files[i])
-  
-  # Estrai i valori dalle aree protette
   extracted <- extract(r, protected_areas, touches = TRUE)
-  
-  # Conta il numero totale di aree protette con habitat
-  total_pa_with_habitat <- sum(
-    tapply(extracted[, 2], extracted[, 1], function(values) any(values == 1, na.rm = TRUE))
-  )
-  
-  percent_coverage_df$total_protected_areas[i] <- total_pa_with_habitat
-  
-  gc()
-  
+  df_extracted <- as.data.frame(extracted)
+  nnodes <- df_extracted %>%
+    group_by(ID) %>%
+    summarise(covered = any(.data[[names(df_extracted)[2]]] == 1, na.rm = T), .groups = "drop") %>%
+    summarise(nnodes = sum(covered)) %>%
+    pull(nnodes)
+  percent_coverage_df$nnodes[i] <- nnodes
+  pb$tick(tokens = list(species = basename(raster_files[i])))
+
 }
 
-nodes_df$total_PAs <- percent_coverage_df$total_protected_areas
-write.csv(nodes_df, "nodes_df.csv")
+sp_nodes_df <- percent_coverage_df |>
+  dplyr::arrange(nnodes)
+write.csv(sp_nodes_df, "data/sp_nodes_df.csv")
+
 
 
 ##################################################################################################################################
@@ -411,3 +416,8 @@ res_dpa <- ita_pas_raster |>
   dir_rescale(max_scale = 100)
 
 #writeRaster(res_dpa, "data/dpa_res.tif")
+
+############### poi merge e res common. vedi fx res common
+
+#############################################################################################
+################################## sp_specific resistance e nodes
