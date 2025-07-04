@@ -421,3 +421,66 @@ res_dpa <- ita_pas_raster |>
 
 #############################################################################################
 ################################## sp_specific resistance e nodes
+
+raster_files <- list.files("LIPU_AOH/", pattern = "\\.tif$", full.names = TRUE)
+test <- rast(raster_files[1])
+wdpa_nodi <- vect("data/wdpa_nodi.gpkg") |> terra::project(crs(test))
+ita <- vect("data/ita.shp")|>
+    makeValid() |>
+    aggregate() |>
+    buffer(width = 100000) |> terra::project(crs(test))
+con_common <- rast("data/res_common.tif")
+
+process_species_data <- function(raster_path) {
+  library(terra)
+  library(sf)
+  library(tools)
+  
+  species_name <- file_path_sans_ext(basename(raster_path))
+  
+  res_AOH_sp <- rast(raster_path)
+  ita <- vect("SCB/ita_30_trans_wgs.shp")
+  con_common <- rast("SCB/con_common_trans_30.tif")
+  wdpa_nodi <- vect("SCB/wdpa_nodi_final_30_tr.shp") %>% terra::project(crs(ita))
+  pa_raster <- rast("SCB/pa_raster.tif")
+  template <- rast("SCB/template.tif")
+  
+  extracted <- terra::extract(res_AOH_sp, wdpa_nodi, touches = TRUE)
+  protected_ids <- unique(extracted[extracted[, 2] == 1, 1])
+  overlapping_areas <- wdpa_nodi[protected_ids, ]
+  
+  if (nrow(overlapping_areas) > 0) {
+  centroid_extr <- function(sf) {
+  sf %>% 
+    mutate(
+      centroid = st_centroid(geometry), 
+      centroid_valid = st_within(centroid, geometry, sparse = F)[,1]
+    ) %>%
+    rowwise() %>%
+    mutate(centroid_final = if (centroid_valid == T) centroid
+           else st_point_on_surface(geometry)) %>%
+    ungroup() %>%
+    mutate(centroid_final = st_sfc(centroid_final, crs = st_crs(sf))) %>%
+    {st_geometry(.) <- "centroid_final"; . }
+}
+centroids <- centroid_extr(wdpa_nodi)
+    dir.create("LIPU_AOH/res_rasters/", showWarnings = FALSE, recursive = TRUE)
+    st_write(nodi_sf, paste0("SCB/res_rasters/nodi_", species_name, ".shp"), delete_dsn = TRUE)
+    res_AOH_sp <- ifel(is.na(res_AOH_sp), 100, 0)
+    res_sp_final <- res_common + res_AOH_sp
+    
+    res_sp_final <- crop(res_sp_final, ita)
+    res_sp_final <- mask(res_sp_final, ita)
+    
+    writeRaster(res_sp_final, filename = paste0("SCB/res_rasters/con_", species_name, ".tif"), overwrite = TRUE)
+    
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
+}
+
+# E poi parallelizzi così:
+plan(multisession, workers = 5)
+results <- future_map(raster_files, process_species_data, .progress = TRUE)
+
