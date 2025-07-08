@@ -468,7 +468,200 @@ process_species_data <- function(raster_path) {
 }
 
 
-# E poi parallelizzi così:
 plan(multisession, workers = 4)
 results <- future_map(test, process_species_data, .progress = TRUE)
 
+
+############################################################################################################
+####################################### corridor mapping ###################################################
+
+####################################### mapping sp-specific corridors
+
+process_species_paths <- function(species_name) {
+  library(terra)
+  library(sf)
+  library(raster)
+  library(gdistance)
+  library(furrr)
+  
+ res_path <- paste0("AOH_LIPU/res_rasters/res_", species_name, ".tif")
+ nodes_path <- paste0("AOH_LIPU/res_rasters/nodes_", species_name, ".gpkg")
+  
+  if (!file.exists(res_path) || !file.exists(nodes_path)) {
+    message("Missing files for species: ", species_name)
+    return(NULL)
+  }
+  
+  r <- terra::rast(res_path)
+  values(r)[values(r) == 0] <- 1e-10
+  n <- terra::vect(nodes_path)
+  
+  r_low <- terra::aggregate(r, fact=3, fun="min") |> raster()
+  tr_low <- transition(r_low, mean, directions = 8)
+  tr_low <- geoCorrection(tr_low)
+  gc()
+  
+  r_high <- raster(r)
+  tr_high <- transition(r_high, mean, directions = 8)
+  tr_high <- geoCorrection(tr_high)
+  gc()
+  
+  n_coords <- as.matrix(terra::crds(n))
+  
+  cm_low <- costDistance(tr_low, n_coords)
+  max_val <- max(cm_low[is.finite(cm_low)], na.rm = TRUE)
+  cm_low[!is.finite(cm_low)] <- max_val * 10
+  gc()
+  
+  calculate_mst <- function(cost_matrix) {
+    n <- nrow(cost_matrix)
+    parent <- integer(n)
+    key <- rep(Inf, n)
+    included <- logical(n)
+    key[1] <- 0
+    parent[1] <- -1
+    for(count in 1:(n-1)) {
+      min_index <- which.min(ifelse(included, Inf, key))
+      included[min_index] <- TRUE
+      for(v in 1:n) {
+        if(!included[v] && cost_matrix[min_index, v] < key[v]) {
+          parent[v] <- min_index
+          key[v] <- cost_matrix[min_index, v]
+        }
+      }
+    }
+    return(parent)
+  }
+  
+  mst_parent <- calculate_mst(as.matrix(cm_low))
+  indices <- 2:length(mst_parent)
+  
+  n_file <- tempfile(pattern = paste0("n_", species_name), fileext = ".rds")
+  tr_high_file <- tempfile(pattern = paste0("tr_high_", species_name), fileext = ".rds")
+  saveRDS(n, n_file)
+  saveRDS(tr_high, tr_high_file)
+  paths_env <- list(n_path = n_file, tr_path = tr_high_file)
+  
+  all_paths <- future_map(indices, function(i, paths) {
+    p <- readRDS(paths$n_path)
+    tr_high <- readRDS(paths$tr_path)
+    
+    from_idx <- mst_parent[i]
+    to_idx <- i
+    if (from_idx < 1) return(NULL)
+    
+    from_coords <- terra::crds(p[from_idx, ], df = TRUE)
+    to_coords <- terra::crds(p[to_idx, ], df = TRUE)
+    
+    from_cell <- raster::cellFromXY(raster(tr_high), from_coords)
+    to_cell <- raster::cellFromXY(raster(tr_high), to_coords)
+    
+    from_xy <- raster::xyFromCell(raster(tr_high), from_cell)
+    to_xy <- raster::xyFromCell(raster(tr_high), to_cell)
+    
+    path <- tryCatch({
+      shortestPath(tr_high, from_xy, to_xy, output = "SpatialLines")
+    }, error = function(e) return(NULL))
+    gc()
+    
+    if (is.null(path)) return(NULL)
+    
+    path_sf <- tryCatch({
+      sf_path <- st_as_sf(path)
+      if (any(!is.finite(st_bbox(st_as_sfc(sf_path))))) {
+        return(NULL)
+      }
+      sf_path
+    }, error = function(e) {
+      return(NULL)
+    })
+    
+    return(path_sf)
+  }, paths = paths_env, .options = furrr_options(seed = T), .progress = T)
+  
+  unlink(n_file)
+  unlink(tr_high_file)
+  gc()
+  all_paths <- all_paths[!sapply(all_paths, is.null)]
+  if (length(all_paths) > 0) {
+    all_paths_combined <- tryCatch({
+      do.call(rbind, all_paths)
+    }, error = function(e) {
+      message("Error combining paths: ", e$message)
+      return(NULL)
+    })
+    
+    if (!is.null(all_paths_combined) && nrow(all_paths_combined) > 0) {
+      out_dir <- "AOH_LIPU/paths"
+      if (!dir.exists(out_dir)) {
+        dir.create(out_dir, recursive = TRUE)
+      }
+      
+      out_path <- paste0(out_dir, "/paths_", species_name, ".gpkg")
+      st_write(all_paths_combined, out_path, delete_layer = TRUE, quiet = TRUE)
+      gc()
+      return(TRUE)
+    } else {
+      message("No valid paths to combine for: ", species_name)
+    }
+  } else {
+    message("No valid paths for: ", species_name)
+  }
+  return(FALSE)
+}
+gc()
+
+
+test <- process_species_paths("Haematopus_ostralegus")
+paths_test <- vect("AOH_LIPU/paths/paths_Haematopus_ostralegus.gpkg")
+crs(paths_test) <- "EPSG:3035"
+res_test <- rast("AOH_LIPU/res_rasters/res_Haematopus_ostralegus.tif")
+n_test <- vect("AOH_LIPU/res_rasters/nodes_Haematopus_ostralegus.gpkg")
+plot(res_test)
+plot(n_test, add = T)
+plot(paths_test, add = T)
+
+files <- list.files("AOH_LIPU/res_rasters/", pattern = "^nodes_.*\\.gpkg$", full.names = FALSE)
+species_names <- gsub("^nodes_(.*)\\.gpkg$", "\\1", files)
+species_names <- species_names[species_names != "Haematopus_ostralegus"]
+
+log_df <- data.frame(
+  species = character(),
+  status = character(),
+  time = character(),
+  message = character(),
+  stringsAsFactors = FALSE
+)
+
+for (species in species_names) {
+  message("\n==============================")
+  message(" Start: ", species)
+  start_time <- Sys.time()
+  result <- tryCatch(
+    {
+      success <- process_species_paths(species)
+      status <- if (isTRUE(success)) "toooop!" else "no_paths"
+      msg <- NA
+      status
+    },
+    error = function(e) {msg <- conditionMessage(e)
+    status <- "error"
+    status
+    }
+  )
+  end_time <- Sys.time()
+  
+  log_df <- rbind(log_df, data.frame(
+    species = species, 
+    status = status,
+    time = format(difftime(end_time, start_time, units = "mins"), digits = 2),
+    message = ifelse(exists("msg"), msg, NA),
+    StringAsFactors = FALSE
+  ))
+  
+  if (exists("msg")) rm(msg)
+}
+  
+  
+  
+  
