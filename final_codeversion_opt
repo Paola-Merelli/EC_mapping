@@ -427,7 +427,8 @@ process_species_data <- function(raster_path) {
   library(terra)
   library(sf)
   library(tools)
-  
+  on.exit(future:::ClusterRegistry("stop"))
+
   species_name <- file_path_sans_ext(basename(raster_path))
   
   ita <- terra::vect("data/ita.shp") |> terra::makeValid() |> terra::aggregate() |> terra::buffer(width = 100000)
@@ -469,7 +470,7 @@ process_species_data <- function(raster_path) {
 
 
 plan(multisession, workers = 4)
-results <- future_map(test, process_species_data, .progress = TRUE)
+results <- future_map(raster_files, process_species_data, .progress = TRUE)
 
 
 ############################################################################################################
@@ -477,7 +478,19 @@ results <- future_map(test, process_species_data, .progress = TRUE)
 
 ####################################### mapping sp-specific corridors
 
+####################################### mapping sp-specific corridors
+plan(multisession, workers = 2)
+options(future.allowRecursive = TRUE)
+
+cleanup <- function() {
+  unlink(list.files(tempdir(), full.names = TRUE), recursive = TRUE)
+  terra::tmpFiles(remove = TRUE)
+  gc()
+}
+
 process_species_paths <- function(species_name) {
+  on.exit(future:::ClusterRegistry("stop"))
+  
   library(terra)
   library(sf)
   library(raster)
@@ -497,12 +510,12 @@ process_species_paths <- function(species_name) {
   n <- terra::vect(nodes_path)
   
   r_low <- terra::aggregate(r, fact=3, fun="min") |> raster()
-  tr_low <- transition(r_low, mean, directions = 8)
+  tr_low <- transition(r_low, mean, directions = 4)
   tr_low <- geoCorrection(tr_low)
   gc()
   
   r_high <- raster(r)
-  tr_high <- transition(r_high, mean, directions = 8)
+  tr_high <- transition(r_high, mean, directions = 4)
   tr_high <- geoCorrection(tr_high)
   gc()
   
@@ -543,6 +556,7 @@ process_species_paths <- function(species_name) {
   paths_env <- list(n_path = n_file, tr_path = tr_high_file)
   
   all_paths <- future_map(indices, function(i, paths) {
+    message("Worker ", Sys.getpid(), " is processing i = ", i)
     p <- readRDS(paths$n_path)
     tr_high <- readRDS(paths$tr_path)
     
@@ -565,7 +579,7 @@ process_species_paths <- function(species_name) {
     gc()
     
     if (is.null(path)) return(NULL)
-    
+    terra::crs(path) <- terra::crs(r)
     path_sf <- tryCatch({
       sf_path <- st_as_sf(path)
       if (any(!is.finite(st_bbox(st_as_sfc(sf_path))))) {
@@ -599,6 +613,7 @@ process_species_paths <- function(species_name) {
       
       out_path <- paste0(out_dir, "/paths_", species_name, ".gpkg")
       st_write(all_paths_combined, out_path, delete_layer = TRUE, quiet = TRUE)
+      rm(r, r_low, r_high, tr_low, tr_high, cm_low, mst_parent, all_paths)
       gc()
       return(TRUE)
     } else {
@@ -609,8 +624,6 @@ process_species_paths <- function(species_name) {
   }
   return(FALSE)
 }
-gc()
-
 
 test <- process_species_paths("Haematopus_ostralegus")
 paths_test <- vect("AOH_LIPU/paths/paths_Haematopus_ostralegus.gpkg")
@@ -623,45 +636,50 @@ plot(paths_test, add = T)
 
 files <- list.files("AOH_LIPU/res_rasters/", pattern = "^nodes_.*\\.gpkg$", full.names = FALSE)
 species_names <- gsub("^nodes_(.*)\\.gpkg$", "\\1", files)
-species_names <- species_names[species_names != "Haematopus_ostralegus"]
+subset <- c("Arenaria_interpres", "Fratercula_arctica", "Lagopus_muta", "Pandion_haliaetus")
+species_names <- species_names[species_names %in% subset]
 
 log_df <- data.frame(
   species = character(),
   status = character(),
   time = character(),
-  message = character(),
+  log_msg = character(),
   stringsAsFactors = FALSE
 )
 
 for (species in species_names) {
   message("\n==============================")
   message(" Start: ", species)
+  
   start_time <- Sys.time()
+  status <- "not_run"
+  msg <- NA
+  
   result <- tryCatch(
     {
       success <- process_species_paths(species)
       status <- if (isTRUE(success)) "toooop!" else "no_paths"
-      msg <- NA
       status
     },
-    error = function(e) {msg <- conditionMessage(e)
-    status <- "error"
-    status
+    error = function(e) {
+      msg <- conditionMessage(e)
+       "error"
     }
   )
+  
   end_time <- Sys.time()
   
   log_df <- rbind(log_df, data.frame(
     species = species, 
     status = status,
     time = format(difftime(end_time, start_time, units = "mins"), digits = 2),
-    message = ifelse(exists("msg"), msg, NA),
-    StringAsFactors = FALSE
+    log_msg = msg,
+    stringsAsFactors = FALSE
   ))
-  
-  if (exists("msg")) rm(msg)
+  cleanup()
 }
   
+   
   
   
   
