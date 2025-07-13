@@ -476,9 +476,6 @@ results <- future_map(raster_files, process_species_data, .progress = TRUE)
 ############################################################################################################
 ####################################### corridor mapping ###################################################
 
-####################################### mapping sp-specific corridors
-
-####################################### mapping sp-specific corridors
 plan(multisession, workers = 2)
 options(future.allowRecursive = TRUE)
 
@@ -510,12 +507,12 @@ process_species_paths <- function(species_name) {
   n <- terra::vect(nodes_path)
   
   r_low <- terra::aggregate(r, fact=3, fun="min") |> raster()
-  tr_low <- transition(r_low, mean, directions = 4)
+  tr_low <- transition(r_low, mean, directions = 8)
   tr_low <- geoCorrection(tr_low)
   gc()
   
   r_high <- raster(r)
-  tr_high <- transition(r_high, mean, directions = 4)
+  tr_high <- transition(r_high, mean, directions = 8)
   tr_high <- geoCorrection(tr_high)
   gc()
   
