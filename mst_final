@@ -1,0 +1,23 @@
+calculate_mst <- function(cost_matrix) {
+  n <- nrow(cost_matrix)
+  parent <- rep(NA_integer_, n)
+  key <- rep(Inf, n)
+  included <- logical(n)
+  key[1] <- 0
+  parent[1] <- -1
+  for(count in 1:(n-1)) {
+    min_index <- which.min(ifelse(included, Inf, key))
+    included[min_index] <- TRUE
+    for(v in 1:n) {
+      if(!included[v] && cost_matrix[min_index, v] < key[v]) {
+        parent[v] <- min_index
+        key[v] <- cost_matrix[min_index, v]
+      }
+    }
+     
+  }
+  return(parent)
+} 
+cost_matrix[cost_matrix == 0 & row(cost_matrix) != col(cost_matrix)] <- Inf
+
+mst_parent <- calculate_mst(as.matrix(cost_matrix))
