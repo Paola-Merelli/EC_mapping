@@ -525,7 +525,7 @@ process_species_paths <- function(species_name) {
   
   calculate_mst <- function(cost_matrix) {
     n <- nrow(cost_matrix)
-    parent <- integer(n)
+    parent <- rep(NA_integer_, n)
     key <- rep(Inf, n)
     included <- logical(n)
     key[1] <- 0
@@ -542,7 +542,8 @@ process_species_paths <- function(species_name) {
     }
     return(parent)
   }
-  
+  cm_low[cost_matrix == 0 & row(cost_matrix) != col(cost_matrix)] <- Inf
+
   mst_parent <- calculate_mst(as.matrix(cm_low))
   indices <- 2:length(mst_parent)
   
