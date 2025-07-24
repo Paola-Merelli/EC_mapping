@@ -1,0 +1,110 @@
+library(terra)
+library(sf)
+library(raster)
+library(gdistance)
+library(furrr)
+library(future)
+library(future.apply)
+library(igraph)
+library(plyr)
+
+res_path <- paste0("AOH_LIPU/res_rasters/res_Lagopus_muta.tif")
+nodes_path <- paste0("AOH_LIPU/res_rasters/nodes_Lagopus_muta.gpkg")
+
+r <- terra::rast(res_path) |> terra::aggregate(fact = 3, fun = "min") |> raster()
+r[r == 0] <- 1e-10
+tr <- transition((1/r), mean, directions = 8) |> geoCorrection()
+gc()
+
+n <- terra::vect(nodes_path)
+n_coords <- as.matrix(terra::crds(n))
+cm <- costDistance(tr, n_coords)
+max_val <- max(cm[is.finite(cm)], na.rm = TRUE)
+cm[!is.finite(cm)] <- max_val * 10
+gc()
+
+calculate_mst <- function(cost_matrix) {
+  n <- nrow(cost_matrix)
+  parent <- rep(NA_integer_, n)
+  key <- rep(Inf, n)
+  included <- logical(n)
+  key[1] <- 0
+  parent[1] <- -1
+  for(count in 1:(n-1)) {
+    min_index <- which.min(ifelse(included, Inf, key))
+    included[min_index] <- TRUE
+    for(v in 1:n) {
+      if(!included[v] && cost_matrix[min_index, v] < key[v]) {
+        parent[v] <- min_index
+        key[v] <- cost_matrix[min_index, v]
+      }
+    }
+     
+  }
+  return(parent)
+} 
+mst_parent <- calculate_mst(as.matrix(cm))
+#cm[cm == 0 & row(cm) != col(cm)] <- Inf
+indices <- 2:length(mst_parent)
+n_file <- tempfile(pattern = "n", fileext = ".rds")
+tr_file <- tempfile(pattern = "tr", fileext = ".rds")
+saveRDS(n, n_file)
+saveRDS(tr, tr_file)
+paths_env <- list(n_path = n_file, tr_path = tr_file)
+
+plan(multisession, workers = 2)
+all_paths <- future_map(indices, function(i, paths) {
+  
+  library(terra)
+  library(sf)
+  library(raster)
+  library(gdistance)
+
+  p <- readRDS(paths$n_path)
+  tr <- readRDS(paths$tr_path)
+  
+  from_idx <- mst_parent[i]
+  if (from_idx < 1) return(NULL)
+  
+  from_coords <- terra::crds(p[from_idx, ])
+  to_coords <- terra::crds(p[i, ])
+  
+  path <- tryCatch({
+    shortestPath(tr, from_coords, to_coords, output = "SpatialLines")
+  }, error = function(e) NULL)
+  
+  if (is.null(path) || length(path) == 0 ) return(NULL)
+  
+  tryCatch({st_as_sf(path)
+    }, error = function(e) NULL)
+},paths = paths_env, .options = furrr_options(seed = T), .progress = T)
+unlink(n_file)
+unlink(tr_file)
+gc()
+
+all_paths <- compact(all_paths)
+
+all_paths_combined <- tryCatch({
+  do.call(rbind, all_paths)
+}, error = function(e) {
+  message("Error combining paths: ", e$message)
+  NULL
+})
+
+if(!is.null(all_paths_combined)) {
+  all_paths_combined <- terra::vect(all_paths_combined)
+  terra::crs(all_paths_combined) <- terra::crs(r)
+  
+}
+
+
+plot(r)
+plot(all_paths_combined, add = T)
+plot(n, add = T)
+
+out_dir <- "AOH_LIPU/paths"
+out_path <- paste0(out_dir, "/paths_Lagopus_muta2.gpkg")
+writeVector(all_paths_combined, out_path)
+rm(r, r_low, r_high, tr_low, tr_high, cm_low, mst_parent, all_paths)
+gc()
+
