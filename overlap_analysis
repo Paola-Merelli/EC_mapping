@@ -1,0 +1,451 @@
+
+####################################################################################
+                                overlap analysis
+####################################################################################
+
+shp_folder <- "SCB/paths8/"
+output_folder <- "SCB/results/"
+dir.create(output_folder)
+
+shapefile_paths <- list.files(path = shp_folder, 
+                              pattern = "\\.shp$", 
+                              full.names = TRUE)
+
+process_species <- function(shapefile_path) {
+  file_name <- basename(shapefile_path)
+  species_name <- gsub("paths_(.+)\\.shp$", "\\1", file_name)
+  
+  paths <- st_read(shapefile_path, quiet = TRUE)
+  paths <- st_make_valid(paths)
+  
+  st_crs(paths) <- 3035
+  paths_projected <- st_transform(paths, 3035)
+  paths_projected <- st_make_valid(paths_projected)
+  paths_projected <- st_cast(paths_projected, "MULTILINESTRING")
+  
+  if (nrow(paths_projected) > 0) {
+    # Create union and buffer
+    paths_union <- st_union(paths_projected)
+    paths_union <- st_make_valid(paths_union)
+    
+    buffer <- st_buffer(paths_union, dist = 500)
+    buffer <- st_make_valid(buffer)
+    
+    return(list(species = species_name, buffer = buffer))
+  }
+  
+  return(NULL)
+}
+
+
+species_buffers <- lapply(shapefile_paths, process_species)
+species_buffers <- species_buffers[!sapply(species_buffers, is.null)]
+species_names <- sapply(species_buffers, function(x) x$species)
+buffer_list <- lapply(species_buffers, function(x) x$buffer)
+
+all_buffers <- do.call(rbind, lapply(seq_along(buffer_list), function(i) {
+  st_sf(species = species_names[i], geometry = buffer_list[[i]])
+}))
+
+bbox <- st_bbox(all_buffers)
+resolution <- c(100, 100)
+
+library(terra)
+template_raster <- rast(xmin=bbox[1], xmax=bbox[3], 
+                        ymin=bbox[2], ymax=bbox[4], 
+                        resolution=resolution, 
+                        crs=st_crs(all_buffers)$wkt)
+
+corridor_rasters <- list()
+for(i in 1:nrow(all_buffers)) {
+  corridor <- all_buffers[i, ]
+  species_name <- species_names[i]
+  corridor_vect <- vect(corridor)
+  corridor_rast <- rasterize(corridor_vect, template_raster, field=1, background=0)
+  
+  crs(corridor_rast) <- "EPSG:3035"
+  
+  corridor_rasters[[i]] <- corridor_rast
+  
+  writeRaster(corridor_rast, file.path(output_folder, paste0(species_name, "_corridor_raster.tif")), overwrite=TRUE)
+
+  gc()
+}
+
+
+
+library(sf)
+library(dplyr)
+library(tidyverse)
+library(raster)
+library(exactextractr)
+library(terra)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(vegan)
+
+setwd("/media/r_projects/paola.merelli2/assegno_prin/IBAs/")
+shp_folder <- "SCB/paths8/"
+output_folder <- "SCB/results/"
+dir.create(output_folder)
+
+shapefile_paths <- list.files(path = shp_folder, 
+                              pattern = "\\.shp$", 
+                              full.names = TRUE)
+
+process_species <- function(shapefile_path) {
+  file_name <- basename(shapefile_path)
+  species_name <- gsub("paths8_(.+)\\.shp$", "\\1", file_name)
+  
+  paths <- st_read(shapefile_path, quiet = TRUE)
+  paths <- st_make_valid(paths)
+  
+  st_crs(paths) <- 3035
+  paths_projected <- st_transform(paths, 3035)
+  paths_projected <- st_make_valid(paths_projected)
+  paths_projected <- st_cast(paths_projected, "MULTILINESTRING")
+  
+  if (nrow(paths_projected) > 0) {
+    paths_union <- st_union(paths_projected)
+    paths_union <- st_make_valid(paths_union)
+    
+    buffer <- st_buffer(paths_union, dist = 500)
+    buffer <- st_make_valid(buffer)
+    
+    return(list(species = species_name, buffer = buffer))
+  }
+  
+  return(NULL)
+}
+
+species_buffers <- lapply(shapefile_paths, process_species)
+species_buffers <- species_buffers[!sapply(species_buffers, is.null)]
+species_names <- sapply(species_buffers, function(x) x$species)
+buffer_list <- lapply(species_buffers, function(x) x$buffer)
+all_buffers <- do.call(rbind, lapply(seq_along(buffer_list), function(i) {
+  st_sf(species = species_names[i], geometry = buffer_list[[i]])
+}))
+
+print(paste("n_paths:", nrow(all_buffers)))
+print(paste("CRS_paths:", st_crs(all_buffers)$input))
+
+bbox <- st_bbox(all_buffers)
+resolution <- c(100, 100)
+
+library(terra)
+template_raster <- rast(xmin=bbox[1], xmax=bbox[3], 
+                        ymin=bbox[2], ymax=bbox[4], 
+                        resolution=resolution, 
+                        crs=st_crs(all_buffers)$wkt)
+
+print(ext(template_raster))
+
+corridor_rasters <- list()
+for(i in 1:nrow(all_buffers)) {
+  corridor <- all_buffers[i, ]
+  species_name <- species_names[i]
+  corridor_vect <- vect(corridor)
+  corridor_rast <- rasterize(corridor_vect, template_raster, field=1, background=0)
+  
+  crs(corridor_rast) <- "EPSG:3035"
+  
+  corridor_rasters[[i]] <- corridor_rast
+  
+  writeRaster(corridor_rast, file.path(output_folder, paste0(species_name, "_corridor_raster.tif")), overwrite=TRUE)
+
+  gc()
+}
+
+raster_folder <- "SCB/results/"
+raster_files <- list.files(path = raster_folder, 
+                           pattern = "^paths8.*\\.(tif|tiff)$", 
+                           full.names = TRUE)
+
+check_raster_info <- function(raster_file) {
+  r_info <- rast(raster_file)
+  
+  return(list(
+    filename = raster_file,
+    name = tools::file_path_sans_ext(basename(raster_file)),
+    crs = crs(r_info),
+    ext = ext(r_info),
+    res = res(r_info)
+  ))
+}
+
+raster_info <- lapply(raster_files, check_raster_info)
+
+create_raster_stack <- function(files = raster_files, info = raster_info, chunk_size = 5) {
+  total_files <- length(files)
+  final_stack <- NULL
+  for (i in seq(1, total_files, by = chunk_size)) {
+      end_idx <- min(i + chunk_size - 1, total_files)
+      chunk_files <- files[i:end_idx]
+      chunk_info <- if (!is.null(info)) info[i:end_idx] else NULL
+      
+      print(paste("Elaborazione chunk", ceiling(i/chunk_size), "di", ceiling(total_files/chunk_size),
+                  "(files", i, "-", end_idx, ")"))
+      
+      temp_list <- mapply(function(x, name) {
+        r <- rast(x)
+        names(r) <- name
+        return(r)
+      }, x = chunk_files, name = if (!is.null(chunk_info)) sapply(chunk_info, function(x) x$name) else tools::file_path_sans_ext(basename(chunk_files)), SIMPLIFY = FALSE)
+      
+      if (!is.null(chunk_info)) {
+        names_list <- sapply(chunk_info, function(x) x$name)
+        names(temp_list) <- names_list
+      } else {
+        names(temp_list) <- tools::file_path_sans_ext(basename(chunk_files))
+      }
+      temp_stack <- rast(temp_list)
+      
+      if (is.null(final_stack)) {
+        final_stack <- temp_stack
+      } else {
+        final_stack <- c(final_stack, temp_stack)
+      }
+      
+      rm(temp_list, temp_stack)
+      gc(verbose = FALSE)
+    }
+    
+    return(final_stack)
+  
+}
+
+raster_stack <- create_raster_stack(raster_files)
+#names(raster_stack)
+
+#species_richness <- sum(raster_stack)
+#writeRaster(species_richness, "SCB/results/richness1-80.tif")
+#species_richness <- rast("SCB/results/richness1-80.tif")
+#species_density <- species_richness / 81
+#plot(species_density, col = viridis(100, option = "turbo"))
+#writeRaster(species_density, "SCB/results/density1-80.tif")
+
+library(ggplot)
+files <- list.files(path = "SCB/results/", 
+                           pattern = "^paths8.*\\.(tif|tiff)$",
+                           full.names = TRUE)
+
+species_names <- gsub("^paths8_(.*?)\\.shp_corridor_raster\\.tif$", "\\1", basename(files))
+head(species_names)
+raster_stack <- terra::rast(files)
+names(raster_stack) <- species_names
+
+extent_r <- ext(raster_stack)
+bbox <- st_bbox(raster_stack)
+
+bbox_sfc <- st_as_sfc(bbox, crs = 3035)
+grid_sf <- st_make_grid(bbox_sfc,
+                        cellsize = c(1000, 1000),
+                        what = "polygons")
+
+grid_sf <- st_sf(id = 1:length(grid_sf), geometry = grid_sf)
+
+
+template <- rast(raster_stack)  
+print(template)
+res(template) <- c(1000, 1000) 
+raster_stack_1km <- terra::resample(raster_stack, template, method = "near")
+crs(raster_stack_1km) <- "EPSG:3035"
+
+
+writeRaster(raster_stack_1km, filename = "temp_stack.grd", overwrite = TRUE)
+
+grid_sf <- sf::st_transform(grid_sf, crs = crs(raster_stack_1km))
+
+create_community_matrix_parallel <- function(stack_file, grid_sf, 
+                                             threshold = 0.5, 
+                                             num_cores = 10, 
+                                             presence_absence = TRUE) {
+  library(future.apply)
+  library(dplyr)
+  library(exactextractr)
+  library(raster)
+  
+  plan(multisession, workers = num_cores)
+  
+  total_cells <- nrow(grid_sf)
+  chunk_indices <- split(seq_len(total_cells), cut(seq_len(total_cells), num_cores, labels = FALSE))
+  grid_chunks <- lapply(chunk_indices, function(idx) grid_sf[idx, ])
+  
+  message("➡️ Avvio calcolo parallelo su ", num_cores, " core...")
+  
+  result_list <- future_lapply(grid_chunks, function(chunk) {
+    rast_local <- stack(stack_file)
+    species_names <- names(rast_local)
+    
+    chunk_results <- exact_extract(rast_local, chunk, fun = "mean", append_cols = "id")
+    names(chunk_results) <- gsub("^mean\\.", "", names(chunk_results))
+    
+    if (presence_absence) {
+      for (sp in species_names) {
+        if (sp %in% names(chunk_results)) {
+          chunk_results[[sp]] <- ifelse(chunk_results[[sp]] > threshold, 1, 0)
+        } else {
+          chunk_results[[sp]] <- 0
+        }
+      }
+    }
+    
+    return(chunk_results)
+  }, future.seed = TRUE)
+  
+  final_matrix <- bind_rows(result_list) %>% arrange(id)
+  return(final_matrix)
+}
+
+community_matrix <- create_community_matrix_parallel(
+  stack_file = "temp_stack.grd",
+  grid_sf = grid_sf,
+  threshold = 0.5,
+  num_cores = 10,
+  presence_absence = TRUE
+)
+
+#community_matrix_a <- community_matrix[, !names(community_matrix) %in% "mean"]
+#write.csv(community_matrix, "community_matrix_test.csv")
+community_matrix <- read_csv("community_matrix_test.csv")
+community_matrix <- community_matrix[, -1]
+
+community_stats <- list(
+  n_species = ncol(community_matrix) - 1,  # Subtract 1 for the ID column
+  n_cells = nrow(community_matrix),
+  max_possible_richness = ncol(community_matrix) - 1
+)
+print(community_stats)
+
+plot_species_richness <- function(community_matrix, grid_sf, 
+                                  title = "Species Richness map",
+                                  color_palette = viridis::rocket,
+                                  legend_title = "Species richness",
+                                  save_path = NULL) {
+  
+  species_cols <- setdiff(names(community_matrix), "id")
+  
+  richness <- rowSums(community_matrix[, species_cols], na.rm = TRUE)
+  
+  richness_df <- data.frame(
+    id = community_matrix$id,
+    richness = richness
+  )
+  
+  richness_sf <- grid_sf %>%
+    left_join(richness_df, by = "id")
+  
+  max_richness <- max(richness, na.rm = TRUE)
+  
+  p <- ggplot() +
+    geom_sf(data = richness_sf, aes(fill = richness), color = NA) +
+    scale_fill_gradientn(
+      colors = rev(color_palette(9)),
+      name = legend_title,
+      limits = c(0, max_richness),
+      breaks = seq(0, max_richness, length.out = 5) %>% round()
+    ) +
+    theme_minimal() +
+    ggtitle(title) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      legend.position = "right",
+      axis.text = element_text(size = 8),
+      panel.grid = element_blank(),
+      panel.background = element_rect(fill = "white")
+    )
+  
+  if (!is.null(save_path)) {
+    ggsave(save_path, p, width = 10, height = 8, dpi = 300)
+    message(paste("Plot saved to:", save_path))
+  }
+  
+  return(p)
+}
+
+
+richness_plot <- plot_species_richness(
+  community_matrix = community_matrix,
+  grid_sf = grid_sf,
+  title = "Species Richness Map",
+  save_path = "Species_richness_map.png")
+
+
+
+########### ordination
+library(RhpcBLASctl)
+blas_get_num_procs()
+blas_set_num_threads(8) 
+
+anyNA(community_matrix)
+community_matrix[is.na(community_matrix)] <- 0
+community_matrix_clean <- community_matrix[rowSums(community_matrix[, -1], na.rm = TRUE) > 0, ]
+comm_mat <- community_matrix_clean[, !(names(community_matrix_clean) %in% "id")]
+
+
+######## forse sorensen meglio per qmode
+d_jacc <- vegdist(comm_mat, method = "jaccard", binary = TRUE)
+gc()
+saveRDS(d_jacc, file = "distance_matrix_jaccard.rds")
+d_jacc <- readRDS("distance_matrix_jaccard.rds")
+
+pcoa_result <- cmdscale(d_jacc, k = 3, eig = TRUE)
+saveRDS(pcoa_result, file = "pcoa_result_3axes.rds")
+gc()
+
+#pcoa_result <- readRDS("pcoa_result_3axes.rds")
+
+
+
+
+gc()
+normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+rgb_matrix <- apply(pcoa_result$points, 2, normalize)
+
+filtered_grid <- grid_sf[grid_sf$id %in% community_matrix_clean$id, ]
+filtered_grid$PC1 <- rgb_matrix[, 1]
+filtered_grid$PC2 <- rgb_matrix[, 2]
+filtered_grid$PC3 <- rgb_matrix[, 3]
+filtered_grid$rgb <- rgb(filtered_grid$PC1,
+                         filtered_grid$PC2,
+                         filtered_grid$PC3)
+write_sf(filtered_grid, "prova_rgb.shp")
+library(ggplot2)
+
+ggplot(filtered_grid) +
+  geom_sf(aes(fill = rgb), color = NA) +
+  scale_fill_identity() + 
+  theme_minimal()
+
+
+
+
+
+
+
+grid_vect <- vect(filtered_grid)
+names(grid_vect) 
+
+template_raster <- rast(grid_vect, res = 1000)
+
+r_pc1 <- rasterize(grid_vect, template_raster, field = "PC1")
+r_pc2 <- rasterize(grid_vect, template_raster, field = "PC2")
+r_pc3 <- rasterize(grid_vect, template_raster, field = "PC3")
+
+rgb_rast <- c(r_pc1, r_pc2, r_pc3)
+names(rgb_rast) <- c("R", "G", "B")
+
+plotRGB(rgb_rast, axes = FALSE, main = "PCoA RGB Map")
+
+writeRaster(rgb_rast, "PCoA_RGB_map.tif", overwrite = TRUE)
+
+
+
+library(mapview)
+m <- mapview(filtered_grid,
+        zcol = "rgb",
+        lwd = 0,
+        legend = FALSE)
+mapshot(m, file = "corridoi_rgb_map.png")
+webshot::install_phantomjs()
