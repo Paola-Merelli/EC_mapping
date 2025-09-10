@@ -1,0 +1,66 @@
+library(tidyverse)
+library(terra)
+library(sf)
+library(raster)
+library(future)
+library(future.apply)
+library(dplyr)
+library(igraph)
+
+############### versione aggiornata senza filtro n2k e applicando st_cast + dissolve
+
+ita <- vect("data/ita.shp") |>
+  makeValid() |>
+  aggregate() |>
+  buffer(100000)
+
+sf <- vect("data/ITA_wdpa_cleaned.shp") |>
+  makeValid() |>
+  crop(ita) |>
+  st_as_sf() |>
+  filter(!(MARINE == "marine"))
+
+create_spatial_id <- function(sf) {
+  
+
+  
+  sf_exp <- st_collection_extract(sf, "POLYGON") |>
+    st_cast("POLYGON")
+  
+  n <- st_intersects(sf_exp)
+  edges <- do.call(rbind, lapply(seq_along(n), function(i){
+    if (length(n[[i]]) > 0) {
+      cbind(from = i, to = n[[i]])
+    }
+  }))
+  if (is.null(edges)){
+    sf_exp$group_id <- seq_len(nrow(sf_exp))
+  } else {
+      g <- graph_from_edgelist(edges, directed = F)
+      sf_exp$group_id <- components(g)$membership
+  }
+  dissolved <- sf_exp |>
+    group_by(group_id) |>
+    summarise(geometry = st_union(geometry), .groups = "drop")
+  return(dissolved)
+}
+
+wdpa_nodi <- create_spatial_id(sf)
+
+centroid_extr <- function(sf) {
+  sf %>% 
+    mutate(
+      centroid = st_centroid(geometry), 
+      centroid_valid = st_within(centroid, geometry, sparse = F)[,1]
+    ) %>%
+    rowwise() %>%
+    mutate(centroid_final = if (centroid_valid == T) centroid
+           else st_point_on_surface(geometry)) %>%
+    ungroup() %>%
+    mutate(centroid_final = st_sfc(centroid_final, crs = st_crs(sf))) %>%
+    {st_geometry(.) <- "centroid_final"; . }
+}
+centroids <- centroid_extr(wdpa_nodi)
+
+st_write(wdpa_diss, "data/wdpa_nodi.gpkg")
+st_write(centroids, "centroids_nodi_updated_to_check.gpkg")
